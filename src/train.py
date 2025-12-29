@@ -384,7 +384,7 @@ def main():
         "--eval_every", type=int, default=500, help="Evaluate every N steps"
     )
     parser.add_argument(
-        "--sample_every", type=int, default=2000, help="Run sampler every N steps (0 to disable)"
+        "--sample_every", type=int, default=2000, help="Run reconstruction test every N steps (0 to disable)"
     )
     parser.add_argument(
         "--run_dir", type=str, default="runs", help="Directory to save run outputs (model, loss curve)"
@@ -453,18 +453,15 @@ def main():
             val_chains, crop_len=args.crop_len, scale_factor=scale_factor
         )
 
-        # Use a crop from first validation chain for sampler evaluation
-        # IMPORTANT: Sample at training length (crop_len) to avoid distribution shift
+        # Use a crop from first validation chain for reconstruction test
         val_coords = val_dataset.coords_list[0]
         if len(val_coords) >= args.crop_len:
-            # Take a centered crop
             start = (len(val_coords) - args.crop_len) // 2
             val_crop = val_coords[start : start + args.crop_len]
         else:
-            # Pad if needed (shouldn't happen with min_len filter)
             val_crop = np.zeros((args.crop_len, 3))
             val_crop[:len(val_coords)] = val_coords
-        val_x0_for_sampler = torch.from_numpy(val_crop).float().unsqueeze(0)
+        val_x0_for_recon = torch.from_numpy(val_crop).float().unsqueeze(0)
 
     # Create model and move to device
     model = DiffusionTransformer(
@@ -535,24 +532,32 @@ def main():
                 val_losses.append(val_eval)
                 print(f"{step:>6} {avg_loss:>10.4f} {lr:>12.6f} {train_eval:>10.4f} {val_eval:>10.4f}")
 
-        # Run sampler to test generative quality
+        # Run reconstruction test (meaningful metric for denoising ability)
         if args.sample_every > 0 and step % args.sample_every == 0:
-            if args.overfit:
-                sampler_target = x0
-            else:
-                sampler_target = val_x0_for_sampler
+            recon_target = x0 if args.overfit else val_x0_for_recon
+            recon_target = recon_target.to(device)
 
             sampler = DiffusionSampler(model, schedule)
-            L = sampler_target.shape[1]
-            print(f"\n       Running sampler at step {step} (L={L})...")
-            sample = sampler.sample(shape=(1, L, 3), verbose=False, device=device)
+            L = recon_target.shape[1]
 
-            # Compute generative RMSD - move to CPU for numpy
-            sample_np = sample.squeeze().cpu().numpy() * scale_factor
-            true_np = sampler_target.squeeze().cpu().numpy() * scale_factor
-            gen_rmsd = rmsd(sample_np, true_np, align=True)
+            # Fixed noise level and seed for reproducible metric
+            t_start = 300
+            torch.manual_seed(0)
+
+            # Forward diffuse: x0 -> x_t
+            t_tensor = torch.tensor([t_start], device=device)
+            x_t, _ = schedule.q_sample(recon_target, t_tensor)
+
+            # Reverse diffuse: x_t -> x_hat
+            recon = sampler.sample_from(x_t, start_t=t_start, verbose=False)
+
+            # RMSD in Angstroms
+            recon_np = recon.squeeze().cpu().numpy() * scale_factor
+            true_np = recon_target.squeeze().cpu().numpy() * scale_factor
+            recon_rmsd = rmsd(recon_np, true_np, align=True)
+
             mode = "Train" if args.overfit else "Val"
-            print(f"       Generative RMSD ({mode}): {gen_rmsd:.2f} Å\n")
+            print(f"\n       Reconstruction RMSD ({mode}) from t={t_start}: {recon_rmsd:.2f} Å\n")
 
     # Final evaluation
     print(f"\n{'=' * 60}")
