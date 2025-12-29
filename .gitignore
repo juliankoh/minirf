@@ -8,4 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Data
 data/chain_set.jsonl
+
+# Training outputs
+runs/
+model.pt
+loss_curve.png

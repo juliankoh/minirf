@@ -21,6 +21,7 @@ Canonical Orientation:
 """
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -371,9 +372,15 @@ def main():
         "--sample_every", type=int, default=2000, help="Run sampler every N steps (0 to disable)"
     )
     parser.add_argument(
-        "--save_path", type=str, default="model.pt", help="Path to save trained model"
+        "--run_dir", type=str, default="runs", help="Directory to save run outputs (model, loss curve)"
     )
     args = parser.parse_args()
+
+    # Create timestamped run directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path(args.run_dir) / timestamp
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Run directory: {run_dir}")
 
     # Set seeds
     torch.manual_seed(args.seed)
@@ -584,9 +591,11 @@ def main():
             print("✗ Large gap. Model may be memorizing. Try more data or regularization.")
 
     # Plot and save loss curve
-    plot_loss_curve(losses, args.steps, args.log_every, val_losses if not args.overfit else None)
+    loss_curve_path = run_dir / "loss_curve.png"
+    plot_loss_curve(losses, args.steps, args.log_every, val_losses if not args.overfit else None, save_path=str(loss_curve_path))
 
     # Save model
+    model_path = run_dir / "model.pt"
     save_dict = {
         "model_state_dict": model.state_dict(),
         "args": vars(args),
@@ -595,8 +604,8 @@ def main():
     if not args.overfit and val_losses:
         save_dict["final_val_loss"] = np.mean(val_losses[-10:])
 
-    torch.save(save_dict, args.save_path)
-    print(f"Model saved to: {args.save_path}")
+    torch.save(save_dict, model_path)
+    print(f"Model saved to: {model_path}")
 
 
 if __name__ == "__main__":
