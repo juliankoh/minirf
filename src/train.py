@@ -358,6 +358,9 @@ def main():
     parser.add_argument(
         "--sample_every", type=int, default=2000, help="Run sampler every N steps (0 to disable)"
     )
+    parser.add_argument(
+        "--save_path", type=str, default="model.pt", help="Path to save trained model"
+    )
     args = parser.parse_args()
 
     # Set seeds
@@ -558,6 +561,18 @@ def main():
 
     # Plot and save loss curve
     plot_loss_curve(losses, args.steps, args.log_every, val_losses if not args.overfit else None)
+
+    # Save model
+    save_dict = {
+        "model_state_dict": model.state_dict(),
+        "args": vars(args),
+        "final_train_loss": np.mean(losses[-100:]),
+    }
+    if not args.overfit and val_losses:
+        save_dict["final_val_loss"] = np.mean(val_losses[-10:])
+
+    torch.save(save_dict, args.save_path)
+    print(f"Model saved to: {args.save_path}")
 
 
 if __name__ == "__main__":
