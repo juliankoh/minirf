@@ -250,6 +250,59 @@ def align_to_principal_axes(coords):
     return coords @ vh.T
 
 
+def compute_clashes(coords: np.ndarray, threshold: float = 2.5) -> float:
+    """Count steric clashes (non-bonded atoms too close).
+
+    Excludes immediate neighbors (i, i+1) which are covalently bonded.
+
+    Args:
+        coords: (L, 3) coordinates
+        threshold: Distance threshold in Angstroms (default 2.5 for CA)
+
+    Returns:
+        Number of clashes found
+    """
+    L = len(coords)
+    if L < 3:
+        return 0
+
+    # Calculate all pairwise distances
+    dists = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
+
+    # Mask out diagonal and immediate neighbors (i, i+1)
+    # triu(k=2) keeps only j >= i+2
+    mask = np.triu(np.ones((L, L), dtype=bool), k=2)
+
+    clashes = np.sum((dists < threshold) & mask)
+    return float(clashes)
+
+
+def batch_rmsd_pairwise(batch: np.ndarray) -> float:
+    """Compute average pairwise RMSD within a batch (Diversity metric).
+
+    Args:
+        batch: (B, L, 3) batch of structures
+
+    Returns:
+        Average RMSD between all unique pairs
+    """
+    B = batch.shape[0]
+    if B < 2:
+        return 0.0
+
+    total_rmsd = 0.0
+    count = 0
+
+    # Naive loop is fine for eval batch sizes (e.g. 32-64)
+    for i in range(B):
+        for j in range(i + 1, B):
+            val = rmsd(batch[i], batch[j], align=True)
+            total_rmsd += val
+            count += 1
+
+    return total_rmsd / max(count, 1)
+
+
 def main():
     """Test geometry utilities."""
     from pathlib import Path

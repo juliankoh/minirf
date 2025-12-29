@@ -33,6 +33,7 @@ Canonical Orientation:
 """
 
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -43,8 +44,9 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from .data_cath import filter_chains, get_one_chain
+from .data_cath import filter_chains, get_one_chain, load_chains_by_ids, load_splits
 from .diffusion import DiffusionSchedule
+from .eval import Evaluator, print_eval_report
 from .geom import align_to_principal_axes, center, rmsd
 from .model import DiffusionTransformer
 from .sampler import DiffusionSampler
@@ -397,7 +399,29 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(args.run_dir) / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Tee stdout/stderr to log file
+    log_path = run_dir / "train.log"
+    log_file = open(log_path, "w")
+
+    class Tee:
+        def __init__(self, *streams):
+            self.streams = streams
+
+        def write(self, data):
+            for s in self.streams:
+                s.write(data)
+                s.flush()
+
+        def flush(self):
+            for s in self.streams:
+                s.flush()
+
+    sys.stdout = Tee(sys.__stdout__, log_file)
+    sys.stderr = Tee(sys.__stderr__, log_file)
+
     print(f"Run directory: {run_dir}")
+    print(f"Logging to: {log_path}")
 
     # Set seeds
     torch.manual_seed(args.seed)
@@ -415,6 +439,7 @@ def main():
 
     # Load data
     data_path = Path("data/chain_set.jsonl")
+    splits_path = Path("data/chain_set_splits.json")
     scale_factor = 10.0
 
     print("=" * 60)
@@ -429,22 +454,37 @@ def main():
         val_dataset = None
     else:
         print(f"\nMode: Dataset training")
-        print(f"Loading {args.num_chains} chains (len 40-{args.max_len})...")
-        all_chains = filter_chains(
+        print(f"Using pre-defined splits from {splits_path}")
+
+        # Load pre-defined splits (CATH-stratified)
+        splits = load_splits(splits_path)
+        print(f"Split sizes: train={len(splits['train'])}, val={len(splits['validation'])}, test={len(splits['test'])}")
+
+        # Load train chains (filtered by length)
+        print(f"Loading train chains (len 40-{args.max_len})...")
+        train_chains = load_chains_by_ids(
             data_path,
+            chain_ids=splits["train"],
             min_len=40,
             max_len=args.max_len,
-            limit=args.num_chains,
-            verbose=False,
+            limit=args.num_chains if args.num_chains else None,
+            verbose=True,
         )
 
-        # Shuffle and split 80/20
-        rng.shuffle(all_chains)
-        split_idx = int(len(all_chains) * 0.8)
-        train_chains = all_chains[:split_idx]
-        val_chains = all_chains[split_idx:]
+        # Load val chains (filtered by length)
+        print(f"Loading validation chains (len 40-{args.max_len})...")
+        val_chains = load_chains_by_ids(
+            data_path,
+            chain_ids=splits["validation"],
+            min_len=40,
+            max_len=args.max_len,
+            verbose=True,
+        )
 
-        print(f"Loaded {len(all_chains)} chains")
+        # Shuffle train chains (for training randomness)
+        rng.shuffle(train_chains)
+
+        print(f"After length filtering:")
         print(f"  Train: {len(train_chains)} chains")
         print(f"  Val:   {len(val_chains)} chains")
 
@@ -464,6 +504,31 @@ def main():
         val_recon_mask = torch.zeros(args.max_len, dtype=torch.bool)
         val_recon_mask[:L_val] = True
 
+        # === CREATE FROZEN ANCHOR SET ===
+        # Grab a fixed batch from validation for ALL evaluations.
+        # This removes "lucky batch" noise from metrics.
+        print("Creating frozen evaluation anchor set...")
+        n_anchor = min(32, len(val_dataset))
+        anchor_indices = np.linspace(0, len(val_dataset) - 1, n_anchor, dtype=int)
+        anchor_batch_list = []
+        anchor_mask_list = []
+
+        for idx in anchor_indices:
+            coords = val_dataset.coords_list[idx]
+            L = len(coords)
+            padded = np.zeros((args.max_len, 3))
+            padded[:L] = coords
+            mask = np.zeros(args.max_len, dtype=bool)
+            mask[:L] = True
+
+            anchor_batch_list.append(padded)
+            anchor_mask_list.append(mask)
+
+        anchor_imgs = torch.from_numpy(np.stack(anchor_batch_list)).float()
+        anchor_masks = torch.from_numpy(np.stack(anchor_mask_list)).bool()
+        anchor_set = (anchor_imgs, anchor_masks)
+        print(f"Anchor set: {anchor_imgs.shape[0]} chains, max_len={anchor_imgs.shape[1]}")
+
     # Create model and move to device
     model = DiffusionTransformer(
         d_model=args.d_model,
@@ -477,6 +542,11 @@ def main():
     # Create diffusion schedule and move to device
     schedule = DiffusionSchedule(T=1000)
     schedule = schedule.to(device)
+
+    # Initialize evaluator (only for dataset mode)
+    evaluator = None
+    if not args.overfit:
+        evaluator = Evaluator(model, schedule, device, scale_factor=scale_factor)
 
     # Optimizer and scheduler
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
@@ -560,6 +630,15 @@ def main():
             mode = "Train" if args.overfit else "Val"
             print(f"\n       Reconstruction RMSD ({mode}) from t={t_start}: {recon_rmsd:.2f} Å\n")
 
+        # Run full evaluation scorecard (dataset mode only)
+        if evaluator is not None and step % args.eval_every == 0:
+            print(f"\nRunning detailed evaluation at step {step}...")
+            metrics = evaluator.run_full_eval(
+                anchor_batch=anchor_set,
+                sample_batch_size=16,  # Small batch for speed during training
+            )
+            print_eval_report(metrics, step)
+
     # Final evaluation
     print(f"\n{'=' * 60}")
     print("Final Evaluation")
@@ -620,6 +699,16 @@ def main():
             print("~ Moderate gap. Model is learning but may benefit from more data/regularization.")
         else:
             print("✗ Large gap. Model may be memorizing. Try more data or regularization.")
+
+        # Final comprehensive evaluation
+        print("\n" + "=" * 60)
+        print("FINAL COMPREHENSIVE EVALUATION")
+        print("=" * 60)
+        final_metrics = evaluator.run_full_eval(
+            anchor_batch=anchor_set,
+            sample_batch_size=32,  # Larger batch for final eval
+        )
+        print_eval_report(final_metrics, args.steps)
 
     # Plot and save loss curve
     loss_curve_path = run_dir / "loss_curve.png"

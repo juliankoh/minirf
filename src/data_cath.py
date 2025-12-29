@@ -184,6 +184,74 @@ def filter_chains(
     return filtered
 
 
+def load_splits(splits_path: Path) -> dict[str, list[str]]:
+    """Load pre-defined train/validation/test splits.
+
+    Args:
+        splits_path: Path to chain_set_splits.json
+
+    Returns:
+        Dict with 'train', 'validation', 'test' keys mapping to chain ID lists
+    """
+    with open(splits_path) as f:
+        splits = json.load(f)
+    return {
+        "train": splits["train"],
+        "validation": splits["validation"],
+        "test": splits["test"],
+    }
+
+
+def load_chains_by_ids(
+    data_path: Path,
+    chain_ids: set[str],
+    min_len: int = 40,
+    max_len: int = 512,
+    require_no_nans: bool = True,
+    limit: int | None = None,
+    verbose: bool = False,
+) -> list[dict]:
+    """Load chains matching specific IDs from the dataset.
+
+    Args:
+        data_path: Path to chain_set.jsonl file
+        chain_ids: Set of chain IDs to load (e.g. {'1abc.A', '2def.B'})
+        min_len: Minimum sequence length
+        max_len: Maximum sequence length
+        require_no_nans: If True, reject chains with any NaN coordinates
+        limit: Maximum number of chains to return (None for all)
+        verbose: Print progress updates
+
+    Returns:
+        List of sample dicts matching IDs and passing criteria
+    """
+    filtered = []
+    total = 0
+    chain_ids = set(chain_ids)  # Ensure it's a set for O(1) lookup
+
+    for sample in iter_chain_set_jsonl(data_path):
+        total += 1
+
+        # Check if this chain is in our target set
+        if sample["name"] not in chain_ids:
+            continue
+
+        # Apply length/NaN filters
+        if select_chain(sample, min_len, max_len, require_no_nans):
+            filtered.append(sample)
+
+            if limit is not None and len(filtered) >= limit:
+                break
+
+        if verbose and total % 5000 == 0:
+            print(f"Scanned {total}... (Found {len(filtered)} matching)", end="\r")
+
+    if verbose:
+        print(f"\nScanned: {total}, Matched IDs & criteria: {len(filtered)}")
+
+    return filtered
+
+
 def main():
     """Demo: load one chain and print stats."""
     import sys
