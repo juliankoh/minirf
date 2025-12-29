@@ -363,6 +363,38 @@ def load_single_chain(
     return x0, name
 
 
+def save_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    step: int,
+    args: argparse.Namespace,
+    val_loss: float | None = None,
+) -> None:
+    """Save a training checkpoint.
+
+    Args:
+        path: Path to save checkpoint
+        model: Model to save
+        optimizer: Optimizer state
+        scheduler: LR scheduler state
+        step: Current training step
+        args: Training arguments
+        val_loss: Optional validation loss at this checkpoint
+    """
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "step": step,
+        "args": vars(args),
+    }
+    if val_loss is not None:
+        checkpoint["val_loss"] = val_loss
+    torch.save(checkpoint, path)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train Diffusion Transformer")
     parser.add_argument("--steps", type=int, default=10000, help="Training steps")
@@ -401,6 +433,12 @@ def main():
         type=str,
         default="runs",
         help="Directory to save run outputs (model, loss curve)",
+    )
+    parser.add_argument(
+        "--save_every",
+        type=int,
+        default=5000,
+        help="Save checkpoint every N steps (0 to disable periodic saves)",
     )
     args = parser.parse_args()
 
@@ -461,6 +499,11 @@ def main():
         print(f"Chain: {name}, Length: {x0.shape[1]}")
         train_dataset = None
         val_dataset = None
+
+        # Pre-generate fixed noise for reconstruction test (avoids resetting global RNG)
+        recon_rng = torch.Generator()
+        recon_rng.manual_seed(0)
+        fixed_recon_noise = torch.randn(x0.shape, generator=recon_rng)
     else:
         print(f"\nMode: Dataset training")
         print(f"Using pre-defined splits from {splits_path}")
@@ -514,6 +557,11 @@ def main():
         val_x0_for_recon = torch.from_numpy(val_padded).float().unsqueeze(0)
         val_recon_mask = torch.zeros(args.max_len, dtype=torch.bool)
         val_recon_mask[:L_val] = True
+
+        # Pre-generate fixed noise for reconstruction test (avoids resetting global RNG)
+        recon_rng = torch.Generator()
+        recon_rng.manual_seed(0)
+        fixed_recon_noise = torch.randn(val_x0_for_recon.shape, generator=recon_rng)
 
         # === CREATE FROZEN ANCHOR SET ===
         # Grab a fixed batch from validation for ALL evaluations.
@@ -595,6 +643,8 @@ def main():
 
     losses = []
     val_losses = []
+    best_val_loss = float("inf")
+
     for step in range(1, args.steps + 1):
         # Get batch
         if args.overfit:
@@ -612,19 +662,35 @@ def main():
             if args.overfit:
                 print(f"{step:>6} {avg_loss:>10.4f} {lr:>12.6f}")
             else:
-                # Compute train and val loss
+                # Compute train loss on random batch, val loss on frozen anchor set
                 train_batch, train_mask = train_dataset.sample_batch(4, rng)
-                val_batch, val_mask = val_dataset.sample_batch(4, rng)
                 train_eval = eval_batch_loss(
                     model, schedule, train_batch, train_mask, t=100, device=device
                 )
+                # Use frozen anchor set for stable val metrics (less noise)
+                anchor_x0, anchor_mask = anchor_set
                 val_eval = eval_batch_loss(
-                    model, schedule, val_batch, val_mask, t=100, device=device
+                    model, schedule, anchor_x0, anchor_mask, t=100, device=device
                 )
                 val_losses.append(val_eval)
                 print(
                     f"{step:>6} {avg_loss:>10.4f} {lr:>12.6f} {train_eval:>10.4f} {val_eval:>10.4f}"
                 )
+
+                # Save best checkpoint if val loss improved
+                if val_eval < best_val_loss:
+                    best_val_loss = val_eval
+                    save_checkpoint(
+                        run_dir / "best_model.pt",
+                        model, optimizer, scheduler, step, args, val_loss=val_eval
+                    )
+                    print(f"       New best val loss: {val_eval:.4f} (saved)")
+
+        # Periodic checkpoint saving
+        if args.save_every > 0 and step % args.save_every == 0:
+            ckpt_path = run_dir / f"checkpoint_step{step}.pt"
+            save_checkpoint(ckpt_path, model, optimizer, scheduler, step, args)
+            print(f"\n       Checkpoint saved: {ckpt_path.name}\n")
 
         # Run reconstruction test (meaningful metric for denoising ability)
         if args.sample_every > 0 and step % args.sample_every == 0:
@@ -632,23 +698,29 @@ def main():
             recon_target = recon_target.to(device)
 
             sampler = DiffusionSampler(model, schedule)
-            L = recon_target.shape[1]
 
-            # Fixed noise level and seed for reproducible metric
+            # Fixed noise level for reproducible metric
             t_start = 300
-            torch.manual_seed(0)
 
-            # Forward diffuse: x0 -> x_t
+            # Forward diffuse: x0 -> x_t (use pre-generated noise to avoid resetting global RNG)
             t_tensor = torch.tensor([t_start], device=device)
-            x_t, _ = schedule.q_sample(recon_target, t_tensor)
+            x_t, _ = schedule.q_sample(recon_target, t_tensor, noise=fixed_recon_noise.to(device))
 
-            # Reverse diffuse: x_t -> x_hat
-            recon = sampler.sample_from(x_t, start_t=t_start, verbose=False)
+            # Reverse diffuse: x_t -> x_hat (pass mask so model knows which positions are real)
+            recon_mask = None if args.overfit else val_recon_mask.unsqueeze(0)
+            recon = sampler.sample_from(x_t, start_t=t_start, verbose=False, mask=recon_mask)
 
-            # RMSD in Angstroms
+            # RMSD in Angstroms - only on valid residues (exclude padding)
             recon_np = recon.squeeze().cpu().numpy() * scale_factor
             true_np = recon_target.squeeze().cpu().numpy() * scale_factor
-            recon_rmsd = rmsd(recon_np, true_np, align=True)
+
+            if args.overfit:
+                # No padding in overfit mode
+                recon_rmsd = rmsd(recon_np, true_np, align=True)
+            else:
+                # Mask out padding for proper RMSD and Kabsch alignment
+                mask_np = val_recon_mask.numpy()
+                recon_rmsd = rmsd(recon_np[mask_np], true_np[mask_np], align=True)
 
             mode = "Train" if args.overfit else "Val"
             print(
@@ -761,18 +833,24 @@ def main():
         save_path=str(loss_curve_path),
     )
 
-    # Save model
+    # Save final model (with optimizer/scheduler for potential resumption)
     model_path = run_dir / "model.pt"
+    final_val = np.mean(val_losses[-10:]) if (not args.overfit and val_losses) else None
+    save_checkpoint(model_path, model, optimizer, scheduler, args.steps, args, val_loss=final_val)
+
+    # Also save a simple dict for backward compatibility
     save_dict = {
         "model_state_dict": model.state_dict(),
         "args": vars(args),
         "final_train_loss": np.mean(losses[-100:]),
     }
-    if not args.overfit and val_losses:
-        save_dict["final_val_loss"] = np.mean(val_losses[-10:])
+    if final_val is not None:
+        save_dict["final_val_loss"] = final_val
+    torch.save(save_dict, run_dir / "model_simple.pt")
 
-    torch.save(save_dict, model_path)
     print(f"Model saved to: {model_path}")
+    if not args.overfit:
+        print(f"Best model saved to: {run_dir / 'best_model.pt'}")
 
 
 if __name__ == "__main__":

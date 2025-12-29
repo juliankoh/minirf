@@ -37,6 +37,7 @@ class DiffusionSampler:
         shape: tuple[int, int, int],
         verbose: bool = True,
         device: torch.device | None = None,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Generate samples from pure noise.
 
@@ -44,6 +45,8 @@ class DiffusionSampler:
             shape: (B, L, 3) desired output shape
             verbose: Show progress bar
             device: Device to run on (defaults to model's device)
+            mask: (B, L) boolean mask for valid positions (True=valid, False=padding)
+                  If None, all positions are treated as valid.
 
         Returns:
             (B, L, 3) generated coordinates (scaled)
@@ -58,21 +61,32 @@ class DiffusionSampler:
         # 1. Start with pure Gaussian noise
         x_t = torch.randn(shape, device=device)
 
+        # Default mask: all positions valid
+        if mask is None:
+            mask = torch.ones((B, L), dtype=torch.bool, device=device)
+        else:
+            mask = mask.to(device)
+
         # Reverse timesteps: T-1, T-2, ..., 0
         T = self.schedule.T
         iterator = range(T - 1, -1, -1)
         if verbose:
             iterator = tqdm(iterator, desc="Sampling")
 
+        # Expand mask for coordinate masking: (B, L) -> (B, L, 1)
+        mask_3d = mask.unsqueeze(-1)
+
         for i in iterator:
             t = torch.full((B,), i, dtype=torch.long, device=device)
 
             # 2. Model predicts ε (noise) from current noisy state x_t
-            mask = torch.ones((B, L), dtype=torch.bool, device=device)
             pred_eps = self.model(x_t, t, mask=mask)
 
             # 3. Take one step: x_t -> x_{t-1}
             x_t = self.p_sample(x_t, pred_eps, t, step_index=i)
+
+            # 4. Keep padding frozen at zero (prevents pad drift)
+            x_t = x_t * mask_3d
 
         return x_t
 
@@ -82,6 +96,7 @@ class DiffusionSampler:
         x_t: torch.Tensor,
         start_t: int,
         verbose: bool = True,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Generate samples starting from a given noisy state.
 
@@ -92,6 +107,8 @@ class DiffusionSampler:
             x_t: (B, L, 3) noisy coordinates at timestep start_t
             start_t: Timestep to start denoising from (0 to T-1)
             verbose: Show progress bar
+            mask: (B, L) boolean mask for valid positions (True=valid, False=padding)
+                  If None, all positions are treated as valid.
 
         Returns:
             (B, L, 3) generated coordinates (scaled)
@@ -100,20 +117,31 @@ class DiffusionSampler:
         B, L, _ = x_t.shape
         device = x_t.device
 
+        # Default mask: all positions valid
+        if mask is None:
+            mask = torch.ones((B, L), dtype=torch.bool, device=device)
+        else:
+            mask = mask.to(device)
+
         # Reverse timesteps: start_t, start_t-1, ..., 0
         iterator = range(start_t, -1, -1)
         if verbose:
             iterator = tqdm(iterator, desc=f"Sampling from t={start_t}")
 
+        # Expand mask for coordinate masking: (B, L) -> (B, L, 1)
+        mask_3d = mask.unsqueeze(-1)
+
         for i in iterator:
             t = torch.full((B,), i, dtype=torch.long, device=device)
 
             # Model predicts ε (noise) from current noisy state x_t
-            mask = torch.ones((B, L), dtype=torch.bool, device=device)
             pred_eps = self.model(x_t, t, mask=mask)
 
             # Take one step: x_t -> x_{t-1}
             x_t = self.p_sample(x_t, pred_eps, t, step_index=i)
+
+            # Keep padding frozen at zero (prevents pad drift)
+            x_t = x_t * mask_3d
 
         return x_t
 

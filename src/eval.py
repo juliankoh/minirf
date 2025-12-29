@@ -174,8 +174,8 @@ class Evaluator:
             )
             x_t, _ = self.schedule.q_sample(x0, t_tensor)
 
-            # 2. Denoise back to 0
-            x_recon = self.sampler.sample_from(x_t, start_t=t_start, verbose=False)
+            # 2. Denoise back to 0 (pass mask so model knows which positions are real)
+            x_recon = self.sampler.sample_from(x_t, start_t=t_start, verbose=False, mask=mask)
 
             # 3. Measure RMSD to ground truth
             rmsds = []
