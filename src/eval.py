@@ -60,14 +60,6 @@ class Evaluator:
         device: torch.device,
         scale_factor: float = 10.0,
     ):
-        """Initialize evaluator.
-
-        Args:
-            model: The diffusion transformer model
-            schedule: Diffusion schedule
-            device: Device to run evaluation on
-            scale_factor: Coordinate scaling factor (to convert back to Angstroms)
-        """
         self.model = model
         self.schedule = schedule
         self.device = device
@@ -81,18 +73,7 @@ class Evaluator:
         sample_batch_size: int = 32,
         verbose: bool = True,
     ) -> dict[str, float]:
-        """Run the full scorecard evaluation.
-
-        Args:
-            anchor_batch: Tuple of (coords, mask) for frozen evaluation set
-                - coords: (B, L, 3) scaled coordinates
-                - mask: (B, L) boolean mask for valid residues
-            sample_batch_size: Number of samples to generate for generation metrics
-            verbose: Print progress messages
-
-        Returns:
-            Dictionary of metric_name -> value
-        """
+        """Run the full scorecard evaluation."""
         self.model.eval()
         metrics = {}
 
@@ -111,10 +92,14 @@ class Evaluator:
         metrics.update(recon_stats)
 
         if verbose:
-            print(f"  3. Evaluating Unconditional Generation ({sample_batch_size} samples)...")
-        # Get modal length from anchor batch for generation
+            print(
+                f"  3. Evaluating Unconditional Generation ({sample_batch_size} samples)..."
+            )
+
+        # Determine generation length (median of anchor batch)
         lengths = mask.sum(dim=1)
         modal_length = int(lengths.float().median().item())
+
         gen_stats = self._evaluate_generation(
             n_samples=sample_batch_size,
             length=modal_length,
@@ -256,14 +241,28 @@ class Evaluator:
         for i in range(n_samples):
             dists = []
             for j in range(len(ref_np)):
-                valid = ref_mask_np[j].astype(bool)
-                n_valid = valid.sum()
+                # Extract valid coordinates from reference
+                valid_mask = ref_mask_np[j].astype(bool)
+                ref_valid_coords = ref_np[j, valid_mask]
+
+                n_valid = len(ref_valid_coords)
                 if n_valid < 3:
                     continue
-                sample_crop = samples_np[i, :n_valid]
-                ref_crop = ref_np[j, valid]
+
+                # CRITICAL FIX: Ensure shapes match for RMSD
+                # Truncate both to the minimum length to compare overlapping N-terminus
+                cmp_len = min(length, n_valid)
+
+                # We need a reasonable overlap to calculate RMSD
+                if cmp_len < 10:
+                    continue
+
+                sample_crop = samples_np[i, :cmp_len]
+                ref_crop = ref_valid_coords[:cmp_len]
+
                 d = rmsd(sample_crop, ref_crop, align=True)
                 dists.append(d)
+
             if dists:
                 min_rmsds.append(min(dists))
 
@@ -271,44 +270,6 @@ class Evaluator:
             stats["gen/memorization_nn_rmsd"] = np.median(min_rmsds)
 
         return stats
-
-
-def print_eval_report(metrics: dict[str, float], step: int | str) -> None:
-    """Print a formatted evaluation report.
-
-    Args:
-        metrics: Dictionary of metric_name -> value
-        step: Training step number or label string
-    """
-    print("-" * 60)
-    print(f"EVALUATION REPORT (Step {step})")
-    print("-" * 60)
-
-    print("1. Denoiser Quality")
-    if "denoise/mse_t100" in metrics:
-        print(f"   MSE t=100:      {metrics['denoise/mse_t100']:.4f}")
-    if "denoise/mse_t500" in metrics:
-        print(f"   MSE t=500:      {metrics['denoise/mse_t500']:.4f}")
-    if "denoise/x0_rmsd_t500" in metrics:
-        print(f"   x0 RMSD t=500:  {metrics['denoise/x0_rmsd_t500']:.2f} A")
-
-    print("2. Reconstruction (Sampler Sanity)")
-    if "recon/rmsd_t500" in metrics:
-        print(f"   RMSD from t=500: {metrics['recon/rmsd_t500']:.2f} A")
-    if "recon/rmsd_t900" in metrics:
-        print(f"   RMSD from t=900: {metrics['recon/rmsd_t900']:.2f} A")
-
-    print("3. Generation (Protein-likeness)")
-    if "gen/valid_bond_pct" in metrics:
-        print(f"   Valid Bonds:    {metrics['gen/valid_bond_pct']:.1%}")
-    if "gen/clashes_mean" in metrics:
-        print(f"   Clashes/sample: {metrics['gen/clashes_mean']:.1f}")
-    if "gen/diversity_rmsd" in metrics:
-        print(f"   Diversity:      {metrics['gen/diversity_rmsd']:.2f} A")
-    if "gen/memorization_nn_rmsd" in metrics:
-        print(f"   NN RMSD (memo): {metrics['gen/memorization_nn_rmsd']:.2f} A")
-
-    print("-" * 60)
 
 
 def load_anchor_set(
@@ -319,27 +280,11 @@ def load_anchor_set(
     num_anchors: int = 32,
     scale_factor: float = 10.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Load a consistent set of chains from a specific split.
-
-    Args:
-        data_path: Path to chain_set.jsonl
-        splits_path: Path to chain_set_splits.json
-        split: Which split to use ('validation' or 'test')
-        max_len: Maximum sequence length
-        num_anchors: Number of chains to use
-        scale_factor: Coordinate scaling factor
-
-    Returns:
-        Tuple of (coords, mask) tensors
-    """
+    """Load a consistent set of chains from a specific split."""
     print(f"Loading {split} anchor set...")
-
-    # Load pre-defined splits
     splits = load_splits(splits_path)
     chain_ids = splits[split]
-    print(f"  Split '{split}' has {len(chain_ids)} chain IDs")
 
-    # Load chains matching the split (with length filtering)
     chains = load_chains_by_ids(
         data_path,
         chain_ids=chain_ids,
@@ -347,14 +292,11 @@ def load_anchor_set(
         max_len=max_len,
         verbose=False,
     )
-    print(f"  After length filter (40-{max_len}): {len(chains)} chains")
 
     if len(chains) == 0:
         raise ValueError(f"No chains found in {split} split matching length criteria")
 
-    # Select subset for evaluation
     if len(chains) > num_anchors:
-        # Deterministic selection (first N after sorting by name for reproducibility)
         chains = sorted(chains, key=lambda c: c["name"])[:num_anchors]
 
     print(f"  Using {len(chains)} anchor chains")
@@ -363,7 +305,6 @@ def load_anchor_set(
     batch_mask = []
 
     for chain in chains:
-        # Preprocess: Center -> Align -> Scale -> Pad
         ca_coords = np.array(chain["coords"]["CA"])
         ca_centered, _ = center(ca_coords)
         ca_aligned = align_to_principal_axes(ca_centered)
@@ -391,55 +332,20 @@ def main():
     parser.add_argument(
         "--model_path", type=str, required=True, help="Path to model.pt checkpoint"
     )
-    parser.add_argument(
-        "--data_path",
-        type=str,
-        default="data/chain_set.jsonl",
-        help="Path to chain_set.jsonl",
-    )
-    parser.add_argument(
-        "--splits_path",
-        type=str,
-        default="data/chain_set_splits.json",
-        help="Path to chain_set_splits.json",
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="validation",
-        choices=["validation", "test"],
-        help="Which split to evaluate on",
-    )
-    parser.add_argument(
-        "--device", type=str, default=None, help="Device (cuda/mps/cpu)"
-    )
-    parser.add_argument(
-        "--num_samples",
-        type=int,
-        default=32,
-        help="Number of samples for generation metrics",
-    )
-    parser.add_argument(
-        "--num_anchors",
-        type=int,
-        default=32,
-        help="Number of anchor chains for evaluation",
-    )
+    parser.add_argument("--data_path", type=str, default="data/chain_set.jsonl")
+    parser.add_argument("--splits_path", type=str, default="data/chain_set_splits.json")
+    parser.add_argument("--split", type=str, default="validation")
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--num_samples", type=int, default=32)
+    parser.add_argument("--num_anchors", type=int, default=32)
     args = parser.parse_args()
 
-    # Device setup
     if args.device:
         device = torch.device(args.device)
     else:
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            device = torch.device("mps")
-        else:
-            device = torch.device("cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Load model checkpoint
     model_path = Path(args.model_path)
     if not model_path.exists():
         print(f"Error: Model not found at {model_path}")
@@ -448,7 +354,6 @@ def main():
     print(f"Loading model from {model_path}...")
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
-    # Reconstruct model from saved args
     model_args = checkpoint.get("args", {})
     d_model = model_args.get("d_model", 128)
     num_layers = model_args.get("num_layers", 4)
@@ -465,10 +370,8 @@ def main():
     model.to(device)
     model.eval()
 
-    # Create schedule
     schedule = DiffusionSchedule(T=1000).to(device)
 
-    # Load anchor set from the specified split
     anchor_set = load_anchor_set(
         data_path=Path(args.data_path),
         splits_path=Path(args.splits_path),
@@ -478,7 +381,6 @@ def main():
         scale_factor=scale_factor,
     )
 
-    # Run evaluation
     print("\nRunning evaluation...")
     evaluator = Evaluator(model, schedule, device, scale_factor=scale_factor)
     metrics = evaluator.run_full_eval(
@@ -487,31 +389,42 @@ def main():
         verbose=True,
     )
 
-    # Print report
     print("\n" + "=" * 60)
     print(f"EVALUATION REPORT: {model_path.name}")
-    print(f"Split: {args.split} | Anchors: {args.num_anchors} | Samples: {args.num_samples}")
+    print(
+        f"Split: {args.split} | Anchors: {args.num_anchors} | Samples: {args.num_samples}"
+    )
     print("=" * 60)
 
     print("\n1. Denoiser Quality (Lower is better)")
-    print(f"   MSE (t=100):          {metrics['denoise/mse_t100']:.4f}")
-    print(f"   MSE (t=500):          {metrics['denoise/mse_t500']:.4f}")
-    print(f"   MSE (t=900):          {metrics['denoise/mse_t900']:.4f}")
-    print(f"   x0 RMSD (t=100):      {metrics['denoise/x0_rmsd_t100']:.2f} A")
-    print(f"   x0 RMSD (t=500):      {metrics['denoise/x0_rmsd_t500']:.2f} A")
+    print(f"   MSE (t=100):          {metrics.get('denoise/mse_t100', 0):.4f}")
+    print(f"   MSE (t=500):          {metrics.get('denoise/mse_t500', 0):.4f}")
+    print(f"   MSE (t=900):          {metrics.get('denoise/mse_t900', 0):.4f}")
+    print(f"   x0 RMSD (t=100):      {metrics.get('denoise/x0_rmsd_t100', 0):.2f} A")
+    print(f"   x0 RMSD (t=500):      {metrics.get('denoise/x0_rmsd_t500', 0):.2f} A")
 
     print("\n2. Reconstruction (Sampler Sanity)")
-    print(f"   RMSD from t=500:      {metrics['recon/rmsd_t500']:.2f} A")
-    print(f"   RMSD from t=900:      {metrics['recon/rmsd_t900']:.2f} A")
+    print(f"   RMSD from t=500:      {metrics.get('recon/rmsd_t500', 0):.2f} A")
+    print(f"   RMSD from t=900:      {metrics.get('recon/rmsd_t900', 0):.2f} A")
 
     print(f"\n3. Unconditional Generation ({args.num_samples} samples)")
-    print(f"   Mean Bond Length:     {metrics['gen/bond_len_mean']:.2f} A  (Target: 3.8)")
-    print(f"   Valid Bonds (3.6-4A): {metrics['gen/valid_bond_pct']:.1%}  (Target: >90%)")
-    print(f"   Clashes per sample:   {metrics['gen/clashes_mean']:.2f}  (Target: <1.0)")
-    print(f"   Radius of Gyration:   {metrics['gen/rg_mean']:.2f} A")
-    print(f"   Diversity (RMSD):     {metrics['gen/diversity_rmsd']:.2f} A  (Higher = better)")
+    print(
+        f"   Mean Bond Length:     {metrics.get('gen/bond_len_mean', 0):.2f} A  (Target: 3.8)"
+    )
+    print(
+        f"   Valid Bonds (3.6-4A): {metrics.get('gen/valid_bond_pct', 0):.1%}  (Target: >90%)"
+    )
+    print(
+        f"   Clashes per sample:   {metrics.get('gen/clashes_mean', 0):.2f}  (Target: <1.0)"
+    )
+    print(f"   Radius of Gyration:   {metrics.get('gen/rg_mean', 0):.2f} A")
+    print(
+        f"   Diversity (RMSD):     {metrics.get('gen/diversity_rmsd', 0):.2f} A  (Higher = better)"
+    )
     if "gen/memorization_nn_rmsd" in metrics:
-        print(f"   Memorization (NN):    {metrics['gen/memorization_nn_rmsd']:.2f} A  (Too low = overfitting)")
+        print(
+            f"   Memorization (NN):    {metrics['gen/memorization_nn_rmsd']:.2f} A  (Too low = overfitting)"
+        )
     print("=" * 60)
 
 
