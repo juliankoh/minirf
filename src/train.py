@@ -4,7 +4,7 @@ Usage:
     # Overfit on single chain (sanity check)
     uv run python -m src.train --overfit --steps 2000
 
-    # Train on dataset (100 chains, fixed length crops)
+    # Train on dataset (100 chains, complete domains 40-128 residues)
     uv run python -m src.train --steps 10000 --num_chains 100
 
     # Larger training run
@@ -19,6 +19,12 @@ Training Objective (ε-prediction):
     - At low noise (t→0), x_t ≈ x0, so ε = (x_t - x0)/σ is also learnable
     - This makes learning more uniform across timesteps
     - x0-prediction struggles at high t where x_t has little signal about x0
+
+Data Strategy (Complete Domains):
+    We train on complete protein domains (not random crops) so the model
+    learns what a whole protein looks like - beginning, middle, and end.
+    Chains are filtered to 40-128 residues and padded to max_len.
+    This is crucial for learning proper protein structure.
 
 Canonical Orientation:
     All proteins are aligned to their principal axes (via SVD) during loading.
@@ -47,25 +53,25 @@ from .sampler import DiffusionSampler
 class ProteinDataset:
     """Simple dataset for protein CA coordinates.
 
-    Loads chains into memory and provides random sampling with
-    fixed-length cropping for batching.
+    Loads complete protein domains and pads them to a fixed length.
+    No cropping - the model learns what complete proteins look like.
     """
 
     def __init__(
         self,
         chains: list[dict],
-        crop_len: int = 128,
+        max_len: int = 128,
         scale_factor: float = 10.0,
     ):
         """Initialize dataset.
 
         Args:
             chains: List of chain dicts with 'coords' key containing CA coords
-            crop_len: Fixed length to crop/pad sequences to
+            max_len: Maximum length to pad sequences to
             scale_factor: Coordinate scaling factor
         """
         self.chains = chains
-        self.crop_len = crop_len
+        self.max_len = max_len
         self.scale_factor = scale_factor
 
         # Preprocess all chains: center, align to principal axes, and scale
@@ -81,27 +87,23 @@ class ProteinDataset:
 
     def sample_batch(
         self, batch_size: int, rng: np.random.Generator
-    ) -> tuple[torch.Tensor, torch.Tensor]:  # Updated return type
-        """Sample a batch of fixed-length coordinate crops."""
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample a batch of complete domains, padded to max_len."""
         batch_coords = []
-        batch_mask = []  # New
+        batch_mask = []
 
         for _ in range(batch_size):
             idx = rng.integers(0, len(self.coords_list))
             coords = self.coords_list[idx]
             L = len(coords)
 
-            if L >= self.crop_len:
-                start = rng.integers(0, L - self.crop_len + 1)
-                crop = coords[start : start + self.crop_len]
-                mask = np.ones(self.crop_len, dtype=bool)  # All real
-            else:
-                crop = np.zeros((self.crop_len, 3))
-                crop[:L] = coords
-                mask = np.zeros(self.crop_len, dtype=bool)  # Mixed
-                mask[:L] = True
+            # Pad to max_len (no cropping - chains are pre-filtered to fit)
+            padded = np.zeros((self.max_len, 3))
+            padded[:L] = coords
+            mask = np.zeros(self.max_len, dtype=bool)
+            mask[:L] = True
 
-            batch_coords.append(crop)
+            batch_coords.append(padded)
             batch_mask.append(mask)
 
         return (
@@ -370,7 +372,7 @@ def main():
     )
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
     parser.add_argument(
-        "--crop_len", type=int, default=128, help="Crop length for batching"
+        "--max_len", type=int, default=128, help="Max sequence length (complete domains only)"
     )
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--d_model", type=int, default=128, help="Model dimension")
@@ -427,11 +429,11 @@ def main():
         val_dataset = None
     else:
         print(f"\nMode: Dataset training")
-        print(f"Loading {args.num_chains} chains (min_len={args.crop_len})...")
+        print(f"Loading {args.num_chains} chains (len 40-{args.max_len})...")
         all_chains = filter_chains(
             data_path,
-            min_len=args.crop_len,
-            max_len=512,
+            min_len=40,
+            max_len=args.max_len,
             limit=args.num_chains,
             verbose=False,
         )
@@ -447,21 +449,20 @@ def main():
         print(f"  Val:   {len(val_chains)} chains")
 
         train_dataset = ProteinDataset(
-            train_chains, crop_len=args.crop_len, scale_factor=scale_factor
+            train_chains, max_len=args.max_len, scale_factor=scale_factor
         )
         val_dataset = ProteinDataset(
-            val_chains, crop_len=args.crop_len, scale_factor=scale_factor
+            val_chains, max_len=args.max_len, scale_factor=scale_factor
         )
 
-        # Use a crop from first validation chain for reconstruction test
+        # Use first validation chain (padded) for reconstruction test
         val_coords = val_dataset.coords_list[0]
-        if len(val_coords) >= args.crop_len:
-            start = (len(val_coords) - args.crop_len) // 2
-            val_crop = val_coords[start : start + args.crop_len]
-        else:
-            val_crop = np.zeros((args.crop_len, 3))
-            val_crop[:len(val_coords)] = val_coords
-        val_x0_for_recon = torch.from_numpy(val_crop).float().unsqueeze(0)
+        L_val = len(val_coords)
+        val_padded = np.zeros((args.max_len, 3))
+        val_padded[:L_val] = val_coords
+        val_x0_for_recon = torch.from_numpy(val_padded).float().unsqueeze(0)
+        val_recon_mask = torch.zeros(args.max_len, dtype=torch.bool)
+        val_recon_mask[:L_val] = True
 
     # Create model and move to device
     model = DiffusionTransformer(
