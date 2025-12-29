@@ -499,11 +499,6 @@ def main():
         print(f"Chain: {name}, Length: {x0.shape[1]}")
         train_dataset = None
         val_dataset = None
-
-        # Pre-generate fixed noise for reconstruction test (avoids resetting global RNG)
-        recon_rng = torch.Generator()
-        recon_rng.manual_seed(0)
-        fixed_recon_noise = torch.randn(x0.shape, generator=recon_rng)
     else:
         print(f"\nMode: Dataset training")
         print(f"Using pre-defined splits from {splits_path}")
@@ -557,11 +552,6 @@ def main():
         val_x0_for_recon = torch.from_numpy(val_padded).float().unsqueeze(0)
         val_recon_mask = torch.zeros(args.max_len, dtype=torch.bool)
         val_recon_mask[:L_val] = True
-
-        # Pre-generate fixed noise for reconstruction test (avoids resetting global RNG)
-        recon_rng = torch.Generator()
-        recon_rng.manual_seed(0)
-        fixed_recon_noise = torch.randn(val_x0_for_recon.shape, generator=recon_rng)
 
         # === CREATE FROZEN ANCHOR SET ===
         # Grab a fixed batch from validation for ALL evaluations.
@@ -697,35 +687,34 @@ def main():
             recon_target = x0 if args.overfit else val_x0_for_recon
             recon_target = recon_target.to(device)
 
+            recon_mask = None
+            if not args.overfit:
+                recon_mask = val_recon_mask.unsqueeze(0).to(device)  # (1, L)
+
             sampler = DiffusionSampler(model, schedule)
-
-            # Fixed noise level for reproducible metric
             t_start = 300
-
-            # Forward diffuse: x0 -> x_t (use pre-generated noise to avoid resetting global RNG)
             t_tensor = torch.tensor([t_start], device=device)
-            x_t, _ = schedule.q_sample(recon_target, t_tensor, noise=fixed_recon_noise.to(device))
 
-            # Reverse diffuse: x_t -> x_hat (pass mask so model knows which positions are real)
-            recon_mask = None if args.overfit else val_recon_mask.unsqueeze(0)
-            recon = sampler.sample_from(x_t, start_t=t_start, verbose=False, mask=recon_mask)
+            # fixed noise WITHOUT touching global torch RNG
+            g = torch.Generator(device="cpu")
+            g.manual_seed(0)
+            noise = torch.randn(recon_target.shape, generator=g, device="cpu", dtype=recon_target.dtype).to(device)
 
-            # RMSD in Angstroms - only on valid residues (exclude padding)
-            recon_np = recon.squeeze().cpu().numpy() * scale_factor
-            true_np = recon_target.squeeze().cpu().numpy() * scale_factor
+            x_t, _ = schedule.q_sample(recon_target, t_tensor, noise=noise)
 
-            if args.overfit:
-                # No padding in overfit mode
-                recon_rmsd = rmsd(recon_np, true_np, align=True)
+            recon = sampler.sample_from(x_t, start_t=t_start, mask=recon_mask, verbose=False)
+
+            recon_np = recon.squeeze(0).detach().cpu().numpy() * scale_factor
+            true_np  = recon_target.squeeze(0).detach().cpu().numpy() * scale_factor
+
+            if recon_mask is not None:
+                valid = recon_mask.squeeze(0).detach().cpu().numpy().astype(bool)
+                recon_rmsd = rmsd(recon_np[valid], true_np[valid], align=True)
             else:
-                # Mask out padding for proper RMSD and Kabsch alignment
-                mask_np = val_recon_mask.numpy()
-                recon_rmsd = rmsd(recon_np[mask_np], true_np[mask_np], align=True)
+                recon_rmsd = rmsd(recon_np, true_np, align=True)
 
             mode = "Train" if args.overfit else "Val"
-            print(
-                f"\n       Reconstruction RMSD ({mode}) from t={t_start}: {recon_rmsd:.2f} Å\n"
-            )
+            print(f"\n       Reconstruction RMSD ({mode}) from t={t_start}: {recon_rmsd:.2f} Å\n")
 
         # Run full evaluation scorecard (dataset mode only)
         if evaluator is not None and step % args.eval_every == 0:
