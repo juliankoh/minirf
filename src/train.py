@@ -374,7 +374,10 @@ def main():
     )
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
     parser.add_argument(
-        "--max_len", type=int, default=128, help="Max sequence length (complete domains only)"
+        "--max_len",
+        type=int,
+        default=128,
+        help="Max sequence length (complete domains only)",
     )
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--d_model", type=int, default=128, help="Model dimension")
@@ -385,13 +388,19 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--log_every", type=int, default=100, help="Log every N steps")
     parser.add_argument(
-        "--eval_every", type=int, default=500, help="Evaluate every N steps"
+        "--eval_every", type=int, default=10000, help="Evaluate every N steps"
     )
     parser.add_argument(
-        "--sample_every", type=int, default=2000, help="Run reconstruction test every N steps (0 to disable)"
+        "--sample_every",
+        type=int,
+        default=2000,
+        help="Run reconstruction test every N steps (0 to disable)",
     )
     parser.add_argument(
-        "--run_dir", type=str, default="runs", help="Directory to save run outputs (model, loss curve)"
+        "--run_dir",
+        type=str,
+        default="runs",
+        help="Directory to save run outputs (model, loss curve)",
     )
     args = parser.parse_args()
 
@@ -458,7 +467,9 @@ def main():
 
         # Load pre-defined splits (CATH-stratified)
         splits = load_splits(splits_path)
-        print(f"Split sizes: train={len(splits['train'])}, val={len(splits['validation'])}, test={len(splits['test'])}")
+        print(
+            f"Split sizes: train={len(splits['train'])}, val={len(splits['validation'])}, test={len(splits['test'])}"
+        )
 
         # Load train chains (filtered by length)
         print(f"Loading train chains (len 40-{args.max_len})...")
@@ -527,7 +538,9 @@ def main():
         anchor_imgs = torch.from_numpy(np.stack(anchor_batch_list)).float()
         anchor_masks = torch.from_numpy(np.stack(anchor_mask_list)).bool()
         anchor_set = (anchor_imgs, anchor_masks)
-        print(f"Anchor set: {anchor_imgs.shape[0]} chains, max_len={anchor_imgs.shape[1]}")
+        print(
+            f"Anchor set: {anchor_imgs.shape[0]} chains, max_len={anchor_imgs.shape[1]}"
+        )
 
     # Create model and move to device
     model = DiffusionTransformer(
@@ -556,14 +569,20 @@ def main():
     print(f"\nInitial evaluation (t=100):")
     if args.overfit:
         x0_dev = x0.to(device)
-        eval_result = eval_step(model, schedule, x0_dev, t=100, scale_factor=scale_factor, device=device)
+        eval_result = eval_step(
+            model, schedule, x0_dev, t=100, scale_factor=scale_factor, device=device
+        )
         print(f"  Loss: {eval_result['loss']:.4f}, RMSD: {eval_result['rmsd']:.2f} Å")
     else:
         # Sample batches for initial eval
         train_batch, train_mask = train_dataset.sample_batch(4, rng)
         val_batch, val_mask = val_dataset.sample_batch(4, rng)
-        train_eval = eval_batch_loss(model, schedule, train_batch, train_mask, t=100, device=device)
-        val_eval = eval_batch_loss(model, schedule, val_batch, val_mask, t=100, device=device)
+        train_eval = eval_batch_loss(
+            model, schedule, train_batch, train_mask, t=100, device=device
+        )
+        val_eval = eval_batch_loss(
+            model, schedule, val_batch, val_mask, t=100, device=device
+        )
         print(f"  Train Loss: {train_eval:.4f}, Val Loss: {val_eval:.4f}")
 
     # Training loop
@@ -583,9 +602,7 @@ def main():
         else:
             batch_data = train_dataset.sample_batch(args.batch_size, rng)
 
-        result = train_step(
-            model, schedule, batch_data, optimizer, device=device
-        )
+        result = train_step(model, schedule, batch_data, optimizer, device=device)
         losses.append(result["loss"])
         scheduler.step()
 
@@ -598,10 +615,16 @@ def main():
                 # Compute train and val loss
                 train_batch, train_mask = train_dataset.sample_batch(4, rng)
                 val_batch, val_mask = val_dataset.sample_batch(4, rng)
-                train_eval = eval_batch_loss(model, schedule, train_batch, train_mask, t=100, device=device)
-                val_eval = eval_batch_loss(model, schedule, val_batch, val_mask, t=100, device=device)
+                train_eval = eval_batch_loss(
+                    model, schedule, train_batch, train_mask, t=100, device=device
+                )
+                val_eval = eval_batch_loss(
+                    model, schedule, val_batch, val_mask, t=100, device=device
+                )
                 val_losses.append(val_eval)
-                print(f"{step:>6} {avg_loss:>10.4f} {lr:>12.6f} {train_eval:>10.4f} {val_eval:>10.4f}")
+                print(
+                    f"{step:>6} {avg_loss:>10.4f} {lr:>12.6f} {train_eval:>10.4f} {val_eval:>10.4f}"
+                )
 
         # Run reconstruction test (meaningful metric for denoising ability)
         if args.sample_every > 0 and step % args.sample_every == 0:
@@ -628,7 +651,9 @@ def main():
             recon_rmsd = rmsd(recon_np, true_np, align=True)
 
             mode = "Train" if args.overfit else "Val"
-            print(f"\n       Reconstruction RMSD ({mode}) from t={t_start}: {recon_rmsd:.2f} Å\n")
+            print(
+                f"\n       Reconstruction RMSD ({mode}) from t={t_start}: {recon_rmsd:.2f} Å\n"
+            )
 
         # Run full evaluation scorecard (dataset mode only)
         if evaluator is not None and step % args.eval_every == 0:
@@ -649,7 +674,9 @@ def main():
         print(f"{'Timestep':>10} {'Loss':>10} {'RMSD (Å)':>10}")
         print("-" * 35)
         for t in [100, 250, 500, 750, 900]:
-            eval_result = eval_step(model, schedule, x0, t=t, scale_factor=scale_factor, device=device)
+            eval_result = eval_step(
+                model, schedule, x0, t=t, scale_factor=scale_factor, device=device
+            )
             print(f"{t:>10} {eval_result['loss']:>10.4f} {eval_result['rmsd']:>10.2f}")
     else:
         # Train vs Val comparison
@@ -658,8 +685,12 @@ def main():
         for t in [100, 250, 500, 750, 900]:
             train_batch, train_mask = train_dataset.sample_batch(8, rng)
             val_batch, val_mask = val_dataset.sample_batch(8, rng)
-            train_loss = eval_batch_loss(model, schedule, train_batch, train_mask, t=t, device=device)
-            val_loss = eval_batch_loss(model, schedule, val_batch, val_mask, t=t, device=device)
+            train_loss = eval_batch_loss(
+                model, schedule, train_batch, train_mask, t=t, device=device
+            )
+            val_loss = eval_batch_loss(
+                model, schedule, val_batch, val_mask, t=t, device=device
+            )
             print(f"{t:>10} {train_loss:>12.4f} {val_loss:>12.4f}")
 
     # Summary
@@ -674,7 +705,9 @@ def main():
 
     # Success criteria
     if args.overfit:
-        final_eval = eval_step(model, schedule, x0, t=250, scale_factor=scale_factor, device=device)
+        final_eval = eval_step(
+            model, schedule, x0, t=250, scale_factor=scale_factor, device=device
+        )
         if final_eval["rmsd"] < 5.0:
             print(
                 f"\n✓ Overfitting successful! RMSD at t=250: {final_eval['rmsd']:.2f} Å < 5.0 Å"
@@ -688,17 +721,25 @@ def main():
         # Check generalization gap
         train_batch, train_mask = train_dataset.sample_batch(8, rng)
         val_batch, val_mask = val_dataset.sample_batch(8, rng)
-        final_train = eval_batch_loss(model, schedule, train_batch, train_mask, t=100, device=device)
-        final_val = eval_batch_loss(model, schedule, val_batch, val_mask, t=100, device=device)
+        final_train = eval_batch_loss(
+            model, schedule, train_batch, train_mask, t=100, device=device
+        )
+        final_val = eval_batch_loss(
+            model, schedule, val_batch, val_mask, t=100, device=device
+        )
         gap = final_val - final_train
 
         print(f"\nGeneralization gap (Val - Train): {gap:.4f}")
         if gap < 0.1:
             print("✓ Good generalization! Train and val loss are close.")
         elif gap < 0.3:
-            print("~ Moderate gap. Model is learning but may benefit from more data/regularization.")
+            print(
+                "~ Moderate gap. Model is learning but may benefit from more data/regularization."
+            )
         else:
-            print("✗ Large gap. Model may be memorizing. Try more data or regularization.")
+            print(
+                "✗ Large gap. Model may be memorizing. Try more data or regularization."
+            )
 
         # Final comprehensive evaluation
         print("\n" + "=" * 60)
@@ -712,7 +753,13 @@ def main():
 
     # Plot and save loss curve
     loss_curve_path = run_dir / "loss_curve.png"
-    plot_loss_curve(losses, args.steps, args.log_every, val_losses if not args.overfit else None, save_path=str(loss_curve_path))
+    plot_loss_curve(
+        losses,
+        args.steps,
+        args.log_every,
+        val_losses if not args.overfit else None,
+        save_path=str(loss_curve_path),
+    )
 
     # Save model
     model_path = run_dir / "model.pt"
