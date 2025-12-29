@@ -10,9 +10,15 @@ Usage:
     # Larger training run
     uv run python -m src.train --steps 50000 --num_chains 500 --batch_size 8
 
-Training Objective:
-    Given noisy coordinates x_t at timestep t, predict clean coordinates x0.
-    Loss = MSE(x0_pred, x0)
+Training Objective (ε-prediction):
+    Given noisy coordinates x_t at timestep t, predict the noise ε that was added.
+    Loss = MSE(ε_pred, ε)
+
+    Why ε-prediction instead of x0-prediction?
+    - At high noise levels (t→T), x_t ≈ ε, so predicting ε is easy
+    - At low noise (t→0), x_t ≈ x0, so ε = (x_t - x0)/σ is also learnable
+    - This makes learning more uniform across timesteps
+    - x0-prediction struggles at high t where x_t has little signal about x0
 
 Canonical Orientation:
     All proteins are aligned to their principal axes (via SVD) during loading.
@@ -111,10 +117,10 @@ def train_step(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ) -> dict:
-    """Single training step.
+    """Single training step with ε-prediction.
 
     Args:
-        model: The diffusion transformer
+        model: The diffusion transformer (predicts ε)
         schedule: Diffusion schedule for q_sample
         x0: (B, L, 3) clean coordinates (scaled, canonically oriented)
         optimizer: Optimizer
@@ -142,19 +148,20 @@ def train_step(
     t = torch.randint(0, schedule.T, (B,), device=device)
 
     # Forward diffusion: add noise
+    # x_t = sqrt(α̅_t) * x0 + sqrt(1-α̅_t) * ε
     x_t, noise = schedule.q_sample(x0, t)
 
-    # Model prediction: predict x0
-    x0_pred = model(x_t, t, mask=mask)
+    # Model prediction: predict ε (the noise that was added)
+    eps_pred = model(x_t, t, mask=mask)
 
-    # MASKED LOSS CALCULATION
+    # MASKED LOSS CALCULATION: MSE(ε_pred, ε)
     if mask is not None:
         # Expand mask for coordinates: (B, L) -> (B, L, 3)
-        mask_3d = mask.unsqueeze(-1).expand_as(x0_pred)
+        mask_3d = mask.unsqueeze(-1).expand_as(eps_pred)
         # Only compute error on real atoms
-        loss = F.mse_loss(x0_pred[mask_3d], x0[mask_3d])
+        loss = F.mse_loss(eps_pred[mask_3d], noise[mask_3d])
     else:
-        loss = F.mse_loss(x0_pred, x0)
+        loss = F.mse_loss(eps_pred, noise)
 
     # Backprop
     optimizer.zero_grad()
@@ -180,10 +187,10 @@ def eval_step(
     scale_factor: float = 10.0,
     device: torch.device = torch.device("cpu"),
 ) -> dict:
-    """Evaluate model at a fixed timestep.
+    """Evaluate model at a fixed timestep (ε-prediction).
 
     Args:
-        model: The diffusion transformer
+        model: The diffusion transformer (predicts ε)
         schedule: Diffusion schedule
         x0: (1, L, 3) clean coordinates (scaled)
         t: Timestep to evaluate at
@@ -191,7 +198,7 @@ def eval_step(
         device: Device to run on
 
     Returns:
-        Dictionary with RMSD and loss
+        Dictionary with RMSD and loss (ε MSE)
     """
     model.eval()
     x0 = x0.to(device)
@@ -199,10 +206,18 @@ def eval_step(
     t_tensor = torch.tensor([t], device=device)
     x_t, noise = schedule.q_sample(x0, t_tensor)
 
-    x0_pred = model(x_t, t_tensor)
+    # Model predicts ε
+    eps_pred = model(x_t, t_tensor)
 
-    # MSE loss
-    loss = F.mse_loss(x0_pred, x0).item()
+    # MSE loss on ε
+    loss = F.mse_loss(eps_pred, noise).item()
+
+    # Convert ε_pred to x0_pred for RMSD
+    # x_t = sqrt(α̅_t) * x0 + sqrt(1-α̅_t) * ε
+    # => x0 = (x_t - sqrt(1-α̅_t) * ε) / sqrt(α̅_t)
+    sqrt_alpha_bar = schedule.sqrt_alpha_bars[t]
+    sqrt_one_minus_alpha_bar = schedule.sqrt_one_minus_alpha_bars[t]
+    x0_pred = (x_t - sqrt_one_minus_alpha_bar * eps_pred) / sqrt_alpha_bar
 
     # RMSD in Angstroms - move to CPU for numpy
     x0_np = x0.squeeze(0).cpu().numpy() * scale_factor
@@ -290,10 +305,10 @@ def eval_batch_loss(
     t: int = 100,
     device: torch.device = torch.device("cpu"),
 ) -> float:
-    """Compute MSE loss on a batch at fixed timestep.
+    """Compute ε MSE loss on a batch at fixed timestep.
 
     Args:
-        model: The diffusion transformer
+        model: The diffusion transformer (predicts ε)
         schedule: Diffusion schedule
         x0: (B, L, 3) clean coordinates (scaled)
         mask: (B, L) boolean mask for valid atoms
@@ -301,7 +316,7 @@ def eval_batch_loss(
         device: Device to run on
 
     Returns:
-        MSE loss value
+        MSE loss value (on ε prediction)
     """
     model.eval()
     x0 = x0.to(device)
@@ -310,14 +325,14 @@ def eval_batch_loss(
 
     B = x0.shape[0]
     t_tensor = torch.full((B,), t, dtype=torch.long, device=device)
-    x_t, _ = schedule.q_sample(x0, t_tensor)
-    x0_pred = model(x_t, t_tensor, mask=mask)
+    x_t, noise = schedule.q_sample(x0, t_tensor)
+    eps_pred = model(x_t, t_tensor, mask=mask)
 
     if mask is not None:
-        mask_3d = mask.unsqueeze(-1).expand_as(x0_pred)
-        return F.mse_loss(x0_pred[mask_3d], x0[mask_3d]).item()
+        mask_3d = mask.unsqueeze(-1).expand_as(eps_pred)
+        return F.mse_loss(eps_pred[mask_3d], noise[mask_3d]).item()
     else:
-        return F.mse_loss(x0_pred, x0).item()
+        return F.mse_loss(eps_pred, noise).item()
 
 
 def load_single_chain(
@@ -438,8 +453,18 @@ def main():
             val_chains, crop_len=args.crop_len, scale_factor=scale_factor
         )
 
-        # Use first validation chain for sampler evaluation (true generalization test)
-        val_x0_for_sampler = torch.from_numpy(val_dataset.coords_list[0]).float().unsqueeze(0)
+        # Use a crop from first validation chain for sampler evaluation
+        # IMPORTANT: Sample at training length (crop_len) to avoid distribution shift
+        val_coords = val_dataset.coords_list[0]
+        if len(val_coords) >= args.crop_len:
+            # Take a centered crop
+            start = (len(val_coords) - args.crop_len) // 2
+            val_crop = val_coords[start : start + args.crop_len]
+        else:
+            # Pad if needed (shouldn't happen with min_len filter)
+            val_crop = np.zeros((args.crop_len, 3))
+            val_crop[:len(val_coords)] = val_coords
+        val_x0_for_sampler = torch.from_numpy(val_crop).float().unsqueeze(0)
 
     # Create model and move to device
     model = DiffusionTransformer(
@@ -517,9 +542,9 @@ def main():
             else:
                 sampler_target = val_x0_for_sampler
 
-            print(f"\n       Running sampler at step {step}...")
             sampler = DiffusionSampler(model, schedule)
             L = sampler_target.shape[1]
+            print(f"\n       Running sampler at step {step} (L={L})...")
             sample = sampler.sample(shape=(1, L, 3), verbose=False, device=device)
 
             # Compute generative RMSD - move to CPU for numpy
