@@ -106,6 +106,7 @@ def train_step(
     schedule: DiffusionSchedule,
     x0: torch.Tensor,
     optimizer: torch.optim.Optimizer,
+    device: torch.device,
     augment: bool = True,
     rng: np.random.Generator | None = None,
 ) -> dict:
@@ -116,6 +117,7 @@ def train_step(
         schedule: Diffusion schedule for q_sample
         x0: (B, L, 3) clean coordinates (scaled)
         optimizer: Optimizer
+        device: Device to run on (cuda/mps/cpu)
         augment: Whether to apply random rotation
         rng: Random generator for augmentation
 
@@ -132,17 +134,22 @@ def train_step(
 
     B = x0.shape[0]
 
-    # Random rotation augmentation (per-sample)
+    # Random rotation augmentation (per-sample) - done on CPU before moving to device
     if augment:
         x0_aug = x0.clone()
         for i in range(B):
-            x0_np = x0[i].numpy()
+            x0_np = x0[i].cpu().numpy()
             x0_rot, _ = apply_random_rotation(x0_np, rng)
             x0_aug[i] = torch.from_numpy(x0_rot).float()
         x0 = x0_aug
 
+    # Move to device
+    x0 = x0.to(device)
+    if mask is not None:
+        mask = mask.to(device)
+
     # Sample random timesteps
-    t = torch.randint(0, schedule.T, (B,))
+    t = torch.randint(0, schedule.T, (B,), device=device)
 
     # Forward diffusion: add noise
     x_t, noise = schedule.q_sample(x0, t)
@@ -181,6 +188,7 @@ def eval_step(
     x0: torch.Tensor,
     t: int = 500,
     scale_factor: float = 10.0,
+    device: torch.device = torch.device("cpu"),
 ) -> dict:
     """Evaluate model at a fixed timestep.
 
@@ -190,13 +198,15 @@ def eval_step(
         x0: (1, L, 3) clean coordinates (scaled)
         t: Timestep to evaluate at
         scale_factor: For converting back to Angstroms
+        device: Device to run on
 
     Returns:
         Dictionary with RMSD and loss
     """
     model.eval()
+    x0 = x0.to(device)
 
-    t_tensor = torch.tensor([t])
+    t_tensor = torch.tensor([t], device=device)
     x_t, noise = schedule.q_sample(x0, t_tensor)
 
     x0_pred = model(x_t, t_tensor)
@@ -204,9 +214,9 @@ def eval_step(
     # MSE loss
     loss = F.mse_loss(x0_pred, x0).item()
 
-    # RMSD in Angstroms
-    x0_np = x0.squeeze(0).numpy() * scale_factor
-    x0_pred_np = x0_pred.squeeze(0).numpy() * scale_factor
+    # RMSD in Angstroms - move to CPU for numpy
+    x0_np = x0.squeeze(0).cpu().numpy() * scale_factor
+    x0_pred_np = x0_pred.squeeze(0).cpu().numpy() * scale_factor
     rmsd_val = rmsd(x0_pred_np, x0_np, align=True)
 
     return {
@@ -286,7 +296,9 @@ def eval_batch_loss(
     model: DiffusionTransformer,
     schedule: DiffusionSchedule,
     x0: torch.Tensor,
+    mask: torch.Tensor | None,
     t: int = 100,
+    device: torch.device = torch.device("cpu"),
 ) -> float:
     """Compute MSE loss on a batch at fixed timestep.
 
@@ -294,17 +306,28 @@ def eval_batch_loss(
         model: The diffusion transformer
         schedule: Diffusion schedule
         x0: (B, L, 3) clean coordinates (scaled)
+        mask: (B, L) boolean mask for valid atoms
         t: Timestep to evaluate at
+        device: Device to run on
 
     Returns:
         MSE loss value
     """
     model.eval()
+    x0 = x0.to(device)
+    if mask is not None:
+        mask = mask.to(device)
+
     B = x0.shape[0]
-    t_tensor = torch.full((B,), t, dtype=torch.long)
+    t_tensor = torch.full((B,), t, dtype=torch.long, device=device)
     x_t, _ = schedule.q_sample(x0, t_tensor)
-    x0_pred = model(x_t, t_tensor)
-    return F.mse_loss(x0_pred, x0).item()
+    x0_pred = model(x_t, t_tensor, mask=mask)
+
+    if mask is not None:
+        mask_3d = mask.unsqueeze(-1).expand_as(x0_pred)
+        return F.mse_loss(x0_pred[mask_3d], x0[mask_3d]).item()
+    else:
+        return F.mse_loss(x0_pred, x0).item()
 
 
 def load_single_chain(
@@ -368,6 +391,15 @@ def main():
     np.random.seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
+    # Device setup
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    print(f"Using device: {device}")
+
     # Load data
     data_path = Path("data/chain_set.jsonl")
     scale_factor = 10.0
@@ -413,17 +445,19 @@ def main():
         # Use first validation chain for sampler evaluation (true generalization test)
         val_x0_for_sampler = torch.from_numpy(val_dataset.coords_list[0]).float().unsqueeze(0)
 
-    # Create model
+    # Create model and move to device
     model = DiffusionTransformer(
         d_model=args.d_model,
         num_layers=args.num_layers,
         num_heads=args.num_heads,
     )
+    model = model.to(device)
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {num_params:,}")
 
-    # Create diffusion schedule
+    # Create diffusion schedule and move to device
     schedule = DiffusionSchedule(T=1000)
+    schedule = schedule.to(device)
 
     # Optimizer and scheduler
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
@@ -432,14 +466,15 @@ def main():
     # Initial evaluation
     print(f"\nInitial evaluation (t=100):")
     if args.overfit:
-        eval_result = eval_step(model, schedule, x0, t=100, scale_factor=scale_factor)
+        x0_dev = x0.to(device)
+        eval_result = eval_step(model, schedule, x0_dev, t=100, scale_factor=scale_factor, device=device)
         print(f"  Loss: {eval_result['loss']:.4f}, RMSD: {eval_result['rmsd']:.2f} Å")
     else:
         # Sample batches for initial eval
-        train_batch, _ = train_dataset.sample_batch(4, rng)
-        val_batch, _ = val_dataset.sample_batch(4, rng)
-        train_eval = eval_batch_loss(model, schedule, train_batch, t=100)
-        val_eval = eval_batch_loss(model, schedule, val_batch, t=100)
+        train_batch, train_mask = train_dataset.sample_batch(4, rng)
+        val_batch, val_mask = val_dataset.sample_batch(4, rng)
+        train_eval = eval_batch_loss(model, schedule, train_batch, train_mask, t=100, device=device)
+        val_eval = eval_batch_loss(model, schedule, val_batch, val_mask, t=100, device=device)
         print(f"  Train Loss: {train_eval:.4f}, Val Loss: {val_eval:.4f}")
 
     # Training loop
@@ -460,7 +495,7 @@ def main():
             batch_data = train_dataset.sample_batch(args.batch_size, rng)
 
         result = train_step(
-            model, schedule, batch_data, optimizer, augment=True, rng=rng
+            model, schedule, batch_data, optimizer, device=device, augment=True, rng=rng
         )
         losses.append(result["loss"])
         scheduler.step()
@@ -472,10 +507,10 @@ def main():
                 print(f"{step:>6} {avg_loss:>10.4f} {lr:>12.6f}")
             else:
                 # Compute train and val loss
-                train_batch, _ = train_dataset.sample_batch(4, rng)
-                val_batch, _ = val_dataset.sample_batch(4, rng)
-                train_eval = eval_batch_loss(model, schedule, train_batch, t=100)
-                val_eval = eval_batch_loss(model, schedule, val_batch, t=100)
+                train_batch, train_mask = train_dataset.sample_batch(4, rng)
+                val_batch, val_mask = val_dataset.sample_batch(4, rng)
+                train_eval = eval_batch_loss(model, schedule, train_batch, train_mask, t=100, device=device)
+                val_eval = eval_batch_loss(model, schedule, val_batch, val_mask, t=100, device=device)
                 val_losses.append(val_eval)
                 print(f"{step:>6} {avg_loss:>10.4f} {lr:>12.6f} {train_eval:>10.4f} {val_eval:>10.4f}")
 
@@ -489,11 +524,11 @@ def main():
             print(f"\n       Running sampler at step {step}...")
             sampler = DiffusionSampler(model, schedule)
             L = sampler_target.shape[1]
-            sample = sampler.sample(shape=(1, L, 3), verbose=False)
+            sample = sampler.sample(shape=(1, L, 3), verbose=False, device=device)
 
-            # Compute generative RMSD
-            sample_np = sample.squeeze().numpy() * scale_factor
-            true_np = sampler_target.squeeze().numpy() * scale_factor
+            # Compute generative RMSD - move to CPU for numpy
+            sample_np = sample.squeeze().cpu().numpy() * scale_factor
+            true_np = sampler_target.squeeze().cpu().numpy() * scale_factor
             gen_rmsd = rmsd(sample_np, true_np, align=True)
             mode = "Train" if args.overfit else "Val"
             print(f"       Generative RMSD ({mode}): {gen_rmsd:.2f} Å\n")
@@ -508,17 +543,17 @@ def main():
         print(f"{'Timestep':>10} {'Loss':>10} {'RMSD (Å)':>10}")
         print("-" * 35)
         for t in [100, 250, 500, 750, 900]:
-            eval_result = eval_step(model, schedule, x0, t=t, scale_factor=scale_factor)
+            eval_result = eval_step(model, schedule, x0, t=t, scale_factor=scale_factor, device=device)
             print(f"{t:>10} {eval_result['loss']:>10.4f} {eval_result['rmsd']:>10.2f}")
     else:
         # Train vs Val comparison
         print(f"{'Timestep':>10} {'Train Loss':>12} {'Val Loss':>12}")
         print("-" * 40)
         for t in [100, 250, 500, 750, 900]:
-            train_batch, _ = train_dataset.sample_batch(8, rng)
-            val_batch, _ = val_dataset.sample_batch(8, rng)
-            train_loss = eval_batch_loss(model, schedule, train_batch, t=t)
-            val_loss = eval_batch_loss(model, schedule, val_batch, t=t)
+            train_batch, train_mask = train_dataset.sample_batch(8, rng)
+            val_batch, val_mask = val_dataset.sample_batch(8, rng)
+            train_loss = eval_batch_loss(model, schedule, train_batch, train_mask, t=t, device=device)
+            val_loss = eval_batch_loss(model, schedule, val_batch, val_mask, t=t, device=device)
             print(f"{t:>10} {train_loss:>12.4f} {val_loss:>12.4f}")
 
     # Summary
@@ -533,7 +568,7 @@ def main():
 
     # Success criteria
     if args.overfit:
-        final_eval = eval_step(model, schedule, x0, t=250, scale_factor=scale_factor)
+        final_eval = eval_step(model, schedule, x0, t=250, scale_factor=scale_factor, device=device)
         if final_eval["rmsd"] < 5.0:
             print(
                 f"\n✓ Overfitting successful! RMSD at t=250: {final_eval['rmsd']:.2f} Å < 5.0 Å"
@@ -545,10 +580,10 @@ def main():
             print("  Try more steps or adjust hyperparameters.")
     else:
         # Check generalization gap
-        train_batch, _ = train_dataset.sample_batch(8, rng)
-        val_batch, _ = val_dataset.sample_batch(8, rng)
-        final_train = eval_batch_loss(model, schedule, train_batch, t=100)
-        final_val = eval_batch_loss(model, schedule, val_batch, t=100)
+        train_batch, train_mask = train_dataset.sample_batch(8, rng)
+        val_batch, val_mask = val_dataset.sample_batch(8, rng)
+        final_train = eval_batch_loss(model, schedule, train_batch, train_mask, t=100, device=device)
+        final_val = eval_batch_loss(model, schedule, val_batch, val_mask, t=100, device=device)
         gap = final_val - final_train
 
         print(f"\nGeneralization gap (Val - Train): {gap:.4f}")

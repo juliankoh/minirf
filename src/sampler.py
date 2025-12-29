@@ -36,12 +36,14 @@ class DiffusionSampler:
         self,
         shape: tuple[int, int, int],
         verbose: bool = True,
+        device: torch.device | None = None,
     ) -> torch.Tensor:
         """Generate samples from pure noise.
 
         Args:
             shape: (B, L, 3) desired output shape
             verbose: Show progress bar
+            device: Device to run on (defaults to model's device)
 
         Returns:
             (B, L, 3) generated coordinates (scaled)
@@ -49,8 +51,12 @@ class DiffusionSampler:
         self.model.eval()
         B, L, _ = shape
 
+        # Infer device from model if not specified
+        if device is None:
+            device = next(self.model.parameters()).device
+
         # 1. Start with pure Gaussian noise
-        x_t = torch.randn(shape)
+        x_t = torch.randn(shape, device=device)
 
         # Reverse timesteps: T-1, T-2, ..., 0
         T = self.schedule.T
@@ -59,10 +65,10 @@ class DiffusionSampler:
             iterator = tqdm(iterator, desc="Sampling")
 
         for i in iterator:
-            t = torch.full((B,), i, dtype=torch.long)
+            t = torch.full((B,), i, dtype=torch.long, device=device)
 
             # 2. Predict clean structure x0 from current noisy state x_t
-            mask = torch.ones((B, L), dtype=torch.bool)
+            mask = torch.ones((B, L), dtype=torch.bool, device=device)
             pred_x0 = self.model(x_t, t, mask=mask)
 
             # 3. Take one step: x_t -> x_{t-1}
