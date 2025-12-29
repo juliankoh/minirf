@@ -242,9 +242,18 @@ def compute_ca_dihedrals(ca_coords: np.ndarray) -> np.ndarray:
     return np.arctan2(y, x)
 
 
+def align_to_principal_axes(coords):
+    """Align coordinates to principal axes via SVD."""
+    # coords: (L, 3) centered
+    u, s, vh = np.linalg.svd(coords, full_matrices=False)
+    # vh contains the rotation matrix
+    return coords @ vh.T
+
+
 def main():
     """Test geometry utilities."""
     from pathlib import Path
+
     from .data_cath import get_one_chain
 
     # Load a protein
@@ -259,8 +268,12 @@ def main():
     # Test centering
     centered, centroid = center(ca_coords)
     print(f"\nCentering:")
-    print(f"  Original centroid: [{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}]")
-    print(f"  New centroid: [{centered.mean(axis=0)[0]:.2e}, {centered.mean(axis=0)[1]:.2e}, {centered.mean(axis=0)[2]:.2e}]")
+    print(
+        f"  Original centroid: [{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}]"
+    )
+    print(
+        f"  New centroid: [{centered.mean(axis=0)[0]:.2e}, {centered.mean(axis=0)[1]:.2e}, {centered.mean(axis=0)[2]:.2e}]"
+    )
 
     # Test CA bond lengths
     bonds = ca_bond_lengths(ca_coords)

@@ -14,9 +14,10 @@ Training Objective:
     Given noisy coordinates x_t at timestep t, predict clean coordinates x0.
     Loss = MSE(x0_pred, x0)
 
-Data Augmentation:
-    Random rotations are applied to make the model robust to different
-    orientations (since we don't have full SE(3) equivariance).
+Canonical Orientation:
+    All proteins are aligned to their principal axes (via SVD) during loading.
+    This gives a consistent orientation (longest axis along X) so the model
+    learns to generate proteins in a standard pose.
 """
 
 import argparse
@@ -31,7 +32,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from .data_cath import filter_chains, get_one_chain
 from .diffusion import DiffusionSchedule
-from .geom import apply_random_rotation, center, rmsd
+from .geom import align_to_principal_axes, center, rmsd
 from .model import DiffusionTransformer
 from .sampler import DiffusionSampler
 
@@ -60,12 +61,13 @@ class ProteinDataset:
         self.crop_len = crop_len
         self.scale_factor = scale_factor
 
-        # Preprocess all chains: center and scale
+        # Preprocess all chains: center, align to principal axes, and scale
         self.coords_list = []
         for chain in chains:
             ca_coords = np.array(chain["coords"]["CA"])
             ca_centered, _ = center(ca_coords)
-            self.coords_list.append(ca_centered / scale_factor)
+            ca_aligned = align_to_principal_axes(ca_centered)
+            self.coords_list.append(ca_aligned / scale_factor)
 
     def __len__(self) -> int:
         return len(self.chains)
@@ -107,19 +109,15 @@ def train_step(
     x0: torch.Tensor,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
-    augment: bool = True,
-    rng: np.random.Generator | None = None,
 ) -> dict:
     """Single training step.
 
     Args:
         model: The diffusion transformer
         schedule: Diffusion schedule for q_sample
-        x0: (B, L, 3) clean coordinates (scaled)
+        x0: (B, L, 3) clean coordinates (scaled, canonically oriented)
         optimizer: Optimizer
         device: Device to run on (cuda/mps/cpu)
-        augment: Whether to apply random rotation
-        rng: Random generator for augmentation
 
     Returns:
         Dictionary with loss and metrics
@@ -133,15 +131,6 @@ def train_step(
         mask = None  # For single chain overfit mode
 
     B = x0.shape[0]
-
-    # Random rotation augmentation (per-sample) - done on CPU before moving to device
-    if augment:
-        x0_aug = x0.clone()
-        for i in range(B):
-            x0_np = x0[i].cpu().numpy()
-            x0_rot, _ = apply_random_rotation(x0_np, rng)
-            x0_aug[i] = torch.from_numpy(x0_rot).float()
-        x0 = x0_aug
 
     # Move to device
     x0 = x0.to(device)
@@ -495,7 +484,7 @@ def main():
             batch_data = train_dataset.sample_batch(args.batch_size, rng)
 
         result = train_step(
-            model, schedule, batch_data, optimizer, device=device, augment=True, rng=rng
+            model, schedule, batch_data, optimizer, device=device
         )
         losses.append(result["loss"])
         scheduler.step()
