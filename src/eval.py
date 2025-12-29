@@ -272,6 +272,25 @@ class Evaluator:
         return stats
 
 
+def print_eval_report(metrics: dict[str, float], step: int) -> None:
+    """Print a formatted evaluation report."""
+    print(f"\n{'─' * 50}")
+    print(f"Eval @ Step {step}")
+    print(f"{'─' * 50}")
+
+    print("Denoiser:")
+    print(f"  MSE t=100: {metrics.get('denoise/mse_t100', 0):.4f}  |  t=500: {metrics.get('denoise/mse_t500', 0):.4f}  |  t=900: {metrics.get('denoise/mse_t900', 0):.4f}")
+    print(f"  x0 RMSD t=100: {metrics.get('denoise/x0_rmsd_t100', 0):.2f} A  |  t=500: {metrics.get('denoise/x0_rmsd_t500', 0):.2f} A")
+
+    print("Reconstruction:")
+    print(f"  RMSD from t=500: {metrics.get('recon/rmsd_t500', 0):.2f} A  |  t=900: {metrics.get('recon/rmsd_t900', 0):.2f} A")
+
+    print("Generation:")
+    print(f"  Bond: {metrics.get('gen/bond_len_mean', 0):.2f} A (valid: {metrics.get('gen/valid_bond_pct', 0):.0%})  |  Clashes: {metrics.get('gen/clashes_mean', 0):.1f}  |  Rg: {metrics.get('gen/rg_mean', 0):.1f} A")
+    print(f"  Diversity: {metrics.get('gen/diversity_rmsd', 0):.1f} A  |  NN RMSD: {metrics.get('gen/memorization_nn_rmsd', 0):.1f} A")
+    print(f"{'─' * 50}\n")
+
+
 def load_anchor_set(
     data_path: Path,
     splits_path: Path,
