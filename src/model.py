@@ -13,11 +13,12 @@ Architecture:
     3. Add sinusoidal positional encoding (sequence position)
     4. Add timestep embedding
     5. Process through N transformer blocks with geometric attention
-    6. Project back to 3D: predict clean coordinates x0 (B, L, 3)
+    6. Project back to 3D: predict noise epsilon (B, L, 3)
 
 Prediction Target:
-    This model predicts x0 (clean coordinates) rather than epsilon (noise).
-    This is aligned with RFdiffusion and enables self-conditioning later.
+    This model predicts epsilon (noise) rather than x0 (clean coordinates).
+    This makes learning more uniform across timesteps - at high t, x_t ≈ ε,
+    so predicting ε is easy; at low t, x_t ≈ x0, so ε is also learnable.
 
 The attention mechanism uses RBF-encoded pairwise distances as an additive
 bias, allowing the model to reason about 3D structure while maintaining
@@ -304,8 +305,8 @@ class TransformerBlock(nn.Module):
 class DiffusionTransformer(nn.Module):
     """Diffusion Transformer for protein structure denoising.
 
-    Predicts clean coordinates x0 from noisy coordinates x_t and timestep t.
-    This is aligned with RFdiffusion's approach and enables self-conditioning.
+    Predicts noise epsilon from noisy coordinates x_t and timestep t.
+    The noise prediction is used by the sampler to iteratively denoise.
 
     The model uses geometric attention with pairwise distance bias to
     incorporate 3D structural information.
@@ -324,7 +325,7 @@ class DiffusionTransformer(nn.Module):
         >>> model = DiffusionTransformer(d_model=256, num_layers=6, num_heads=8)
         >>> x_t = torch.randn(2, 100, 3)  # Batch of 2, length 100
         >>> t = torch.tensor([500, 750])  # Timesteps
-        >>> x0_pred = model(x_t, t)  # (2, 100, 3) predicted clean coordinates
+        >>> eps_pred = model(x_t, t)  # (2, 100, 3) predicted noise
     """
 
     def __init__(
@@ -377,7 +378,7 @@ class DiffusionTransformer(nn.Module):
         mask: torch.Tensor | None = None,
         x0_self_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Predict clean coordinates x0 from noisy input.
+        """Predict noise epsilon from noisy input.
 
         Args:
             x_t: (B, L, 3) or (L, 3) noisy CA coordinates
@@ -387,7 +388,7 @@ class DiffusionTransformer(nn.Module):
                           If None, self-conditioning is disabled for this call.
 
         Returns:
-            x0_pred: Same shape as x_t, predicted clean coordinates
+            eps_pred: Same shape as x_t, predicted noise
         """
         # Handle unbatched input
         unbatched = x_t.dim() == 2
@@ -431,13 +432,13 @@ class DiffusionTransformer(nn.Module):
 
         # Output projection
         x = self.final_norm(x)
-        x0_pred = self.output_proj(x)  # (B, L, 3)
+        eps_pred = self.output_proj(x)  # (B, L, 3)
 
         # Handle unbatched output
         if unbatched:
-            x0_pred = x0_pred.squeeze(0)
+            eps_pred = eps_pred.squeeze(0)
 
-        return x0_pred
+        return eps_pred
 
 
 def main():
@@ -446,7 +447,7 @@ def main():
 
     from .data_cath import get_one_chain
     from .diffusion import DiffusionSchedule
-    from .geom import center, rmsd
+    from .geom import center
 
     print("=" * 60)
     print("DiffusionTransformer Smoke Test")
@@ -478,18 +479,12 @@ def main():
     print(f"  Input x_t shape:  {x_t.shape}")
     print(f"  Timestep t:       {t.item()}")
 
-    x0_pred = model(x_t, t)
-    print(f"  Output x0_pred:   {x0_pred.shape}")
+    eps_pred = model(x_t, t)
+    print(f"  Output eps_pred:  {eps_pred.shape}")
 
-    # Compute loss (MSE to true x0)
-    loss = F.mse_loss(x0_pred, x0)
+    # Compute loss (MSE to true noise epsilon)
+    loss = F.mse_loss(eps_pred, eps)
     print(f"  Initial MSE loss: {loss.item():.4f}")
-
-    # Compute RMSD (in physical units)
-    x0_np = x0.squeeze(0).numpy() * 10.0
-    x0_pred_np = x0_pred.detach().squeeze(0).numpy() * 10.0
-    rmsd_val = rmsd(x0_pred_np, x0_np, align=True)
-    print(f"  Initial RMSD:     {rmsd_val:.2f} Angstroms")
 
     # Verify gradients
     print(f"\nGradient check:")
@@ -505,17 +500,17 @@ def main():
     # Test unbatched input
     print(f"\nUnbatched input test:")
     x_t_unbatched = x_t.squeeze(0)
-    x0_pred_unbatched = model(x_t_unbatched, 500)
+    eps_pred_unbatched = model(x_t_unbatched, 500)
     print(f"  Input:  {x_t_unbatched.shape}")
-    print(f"  Output: {x0_pred_unbatched.shape}")
+    print(f"  Output: {eps_pred_unbatched.shape}")
 
     # Test with mask
     print(f"\nMask test:")
     mask = torch.ones(1, x_t.shape[1], dtype=torch.bool)
     mask[0, -10:] = False  # Mask last 10 positions
-    x0_pred_masked = model(x_t, t, mask=mask)
+    eps_pred_masked = model(x_t, t, mask=mask)
     print(f"  Mask shape: {mask.shape} (last 10 positions masked)")
-    print(f"  Output:     {x0_pred_masked.shape}")
+    print(f"  Output:     {eps_pred_masked.shape}")
 
     print("\n" + "=" * 60)
     print("Smoke test passed!")

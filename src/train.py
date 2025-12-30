@@ -47,7 +47,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from .data_cath import filter_chains, get_one_chain, load_chains_by_ids, load_splits
 from .diffusion import DiffusionSchedule
 from .eval import Evaluator, print_eval_report
-from .geom import align_to_principal_axes, center, rmsd
+from .geom import align_to_principal_axes, ca_bond_lengths, center, rmsd
 from .model import DiffusionTransformer
 from .sampler import DiffusionSampler
 
@@ -796,11 +796,18 @@ def main():
             if recon_mask is not None:
                 valid = recon_mask.squeeze(0).detach().cpu().numpy().astype(bool)
                 recon_rmsd = rmsd(recon_np[valid], true_np[valid], align=True)
+                coords_for_bonds = recon_np[valid]
             else:
                 recon_rmsd = rmsd(recon_np, true_np, align=True)
+                coords_for_bonds = recon_np
+
+            # Bond metrics (cheap early warning for broken local geometry)
+            bonds = ca_bond_lengths(coords_for_bonds)
+            bond_valid_pct = ((bonds > 3.6) & (bonds < 4.0)).mean() * 100.0
 
             mode = "Train" if args.overfit else "Val"
-            print(f"\n       Reconstruction RMSD ({mode}) from t={t_start}: {recon_rmsd:.2f} Å\n")
+            print(f"\n       Reconstruction ({mode}) from t={t_start}: RMSD={recon_rmsd:.2f} Å")
+            print(f"       Bonds: mean={bonds.mean():.2f} Å  std={bonds.std():.2f} Å  valid%={bond_valid_pct:.1f}%\n")
 
         # Run full evaluation scorecard (dataset mode only)
         if evaluator is not None and step % args.eval_every == 0:
