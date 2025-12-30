@@ -345,6 +345,12 @@ class DiffusionTransformer(nn.Module):
         # Input projection: 3D coords -> d_model
         self.input_proj = nn.Linear(3, d_model)
 
+        # Self-conditioning projection: previous x0 estimate -> d_model
+        # Initialized to zero so model works without self-conditioning initially
+        self.self_cond_proj = nn.Linear(3, d_model)
+        nn.init.zeros_(self.self_cond_proj.weight)
+        nn.init.zeros_(self.self_cond_proj.bias)
+
         # Timestep embedding
         self.time_embed = TimestepEmbedding(d_model)
 
@@ -369,6 +375,7 @@ class DiffusionTransformer(nn.Module):
         x_t: torch.Tensor,
         t: torch.Tensor | int,
         mask: torch.Tensor | None = None,
+        x0_self_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Predict clean coordinates x0 from noisy input.
 
@@ -376,6 +383,8 @@ class DiffusionTransformer(nn.Module):
             x_t: (B, L, 3) or (L, 3) noisy CA coordinates
             t: (B,) or int timestep indices
             mask: (B, L) boolean mask, True for valid positions
+            x0_self_cond: (B, L, 3) previous x0 estimate for self-conditioning.
+                          If None, self-conditioning is disabled for this call.
 
         Returns:
             x0_pred: Same shape as x_t, predicted clean coordinates
@@ -386,6 +395,8 @@ class DiffusionTransformer(nn.Module):
             x_t = x_t.unsqueeze(0)
             if mask is not None:
                 mask = mask.unsqueeze(0)
+            if x0_self_cond is not None:
+                x0_self_cond = x0_self_cond.unsqueeze(0)
 
         B, L, _ = x_t.shape
 
@@ -400,6 +411,10 @@ class DiffusionTransformer(nn.Module):
 
         # Input projection
         x = self.input_proj(x_t)  # (B, L, d_model)
+
+        # Add self-conditioning if provided
+        if x0_self_cond is not None:
+            x = x + self.self_cond_proj(x0_self_cond)  # (B, L, d_model)
 
         # Add positional encoding
         pos_idx = torch.arange(L, device=x_t.device)

@@ -39,6 +39,7 @@ class DiffusionSampler:
         device: torch.device | None = None,
         mask: torch.Tensor | None = None,
         add_noise: bool = True,
+        use_self_cond: bool = True,
     ) -> torch.Tensor:
         """Generate samples from pure noise.
 
@@ -49,6 +50,7 @@ class DiffusionSampler:
             mask: (B, L) boolean mask for valid positions (True=valid, False=padding)
                   If None, all positions are treated as valid.
             add_noise: If False, use deterministic sampling (no stochastic noise).
+            use_self_cond: If True, use self-conditioning (feed previous x0 estimate).
 
         Returns:
             (B, L, 3) generated coordinates (scaled)
@@ -78,16 +80,29 @@ class DiffusionSampler:
         # Expand mask for coordinate masking: (B, L) -> (B, L, 1)
         mask_3d = mask.unsqueeze(-1)
 
+        # Self-conditioning: track previous x0 estimate
+        x0_self_cond = None
+
         for i in iterator:
             t = torch.full((B,), i, dtype=torch.long, device=device)
 
             # 2. Model predicts ε (noise) from current noisy state x_t
-            pred_eps = self.model(x_t, t, mask=mask)
+            pred_eps = self.model(
+                x_t, t, mask=mask,
+                x0_self_cond=x0_self_cond if use_self_cond else None
+            )
 
-            # 3. Take one step: x_t -> x_{t-1}
+            # 3. Compute x0 estimate for self-conditioning in next step
+            if use_self_cond:
+                sqrt_alpha_bar = self.schedule.sqrt_alpha_bars[i]
+                sqrt_one_minus_alpha_bar = self.schedule.sqrt_one_minus_alpha_bars[i]
+                x0_self_cond = (x_t - sqrt_one_minus_alpha_bar * pred_eps) / sqrt_alpha_bar
+                x0_self_cond = x0_self_cond * mask_3d  # Keep padding at zero
+
+            # 4. Take one step: x_t -> x_{t-1}
             x_t = self.p_sample(x_t, pred_eps, t, step_index=i, add_noise=add_noise)
 
-            # 4. Keep padding frozen at zero (prevents pad drift)
+            # 5. Keep padding frozen at zero (prevents pad drift)
             x_t = x_t * mask_3d
 
         return x_t
@@ -100,6 +115,7 @@ class DiffusionSampler:
         verbose: bool = True,
         mask: torch.Tensor | None = None,
         add_noise: bool = True,
+        use_self_cond: bool = True,
     ) -> torch.Tensor:
         """Generate samples starting from a given noisy state.
 
@@ -114,6 +130,7 @@ class DiffusionSampler:
                   If None, all positions are treated as valid.
             add_noise: If False, use deterministic sampling (no stochastic noise).
                        Useful for reproducible reconstruction evaluation.
+            use_self_cond: If True, use self-conditioning (feed previous x0 estimate).
 
         Returns:
             (B, L, 3) generated coordinates (scaled)
@@ -136,11 +153,24 @@ class DiffusionSampler:
         # Expand mask for coordinate masking: (B, L) -> (B, L, 1)
         mask_3d = mask.unsqueeze(-1)
 
+        # Self-conditioning: track previous x0 estimate
+        x0_self_cond = None
+
         for i in iterator:
             t = torch.full((B,), i, dtype=torch.long, device=device)
 
             # Model predicts ε (noise) from current noisy state x_t
-            pred_eps = self.model(x_t, t, mask=mask)
+            pred_eps = self.model(
+                x_t, t, mask=mask,
+                x0_self_cond=x0_self_cond if use_self_cond else None
+            )
+
+            # Compute x0 estimate for self-conditioning in next step
+            if use_self_cond:
+                sqrt_alpha_bar = self.schedule.sqrt_alpha_bars[i]
+                sqrt_one_minus_alpha_bar = self.schedule.sqrt_one_minus_alpha_bars[i]
+                x0_self_cond = (x_t - sqrt_one_minus_alpha_bar * pred_eps) / sqrt_alpha_bar
+                x0_self_cond = x0_self_cond * mask_3d  # Keep padding at zero
 
             # Take one step: x_t -> x_{t-1}
             x_t = self.p_sample(x_t, pred_eps, t, step_index=i, add_noise=add_noise)

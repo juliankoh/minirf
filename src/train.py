@@ -122,8 +122,14 @@ def train_step(
     device: torch.device,
     scale_factor: float = 10.0,
     bond_loss_weight: float = 0.1,
+    self_cond_prob: float = 0.5,
 ) -> dict:
-    """Single training step with ε-prediction and auxiliary bond-length loss.
+    """Single training step with ε-prediction, bond loss, and self-conditioning.
+
+    Self-conditioning: 50% of the time, run the model forward once to get an
+    initial x0 estimate, then feed it back (with stopped gradients) as a
+    conditioning signal for the second pass. This dramatically improves
+    coherence and performance (per RFdiffusion paper).
 
     Args:
         model: The diffusion transformer (predicts ε)
@@ -133,6 +139,7 @@ def train_step(
         device: Device to run on (cuda/mps/cpu)
         scale_factor: Coordinate scaling factor (for bond length target)
         bond_loss_weight: Weight for auxiliary bond-length loss (λ)
+        self_cond_prob: Probability of using self-conditioning (default 0.5)
 
     Returns:
         Dictionary with loss and metrics
@@ -159,8 +166,22 @@ def train_step(
     # x_t = sqrt(α̅_t) * x0 + sqrt(1-α̅_t) * ε
     x_t, noise = schedule.q_sample(x0, t)
 
-    # Model prediction: predict ε (the noise that was added)
-    eps_pred = model(x_t, t, mask=mask)
+    # SELF-CONDITIONING: 50% of the time, do a first pass and use its output
+    x0_self_cond = None
+    used_self_cond = False
+    if torch.rand(1).item() < self_cond_prob:
+        with torch.no_grad():
+            # First pass: get initial estimate without self-conditioning
+            eps_pred_initial = model(x_t, t, mask=mask, x0_self_cond=None)
+            # Convert eps prediction to x0 prediction
+            sqrt_ab = schedule.sqrt_alpha_bars[t].view(B, 1, 1)
+            sqrt_omb = schedule.sqrt_one_minus_alpha_bars[t].view(B, 1, 1)
+            x0_self_cond = (x_t - sqrt_omb * eps_pred_initial) / sqrt_ab
+            # x0_self_cond is detached (no gradients) due to torch.no_grad()
+        used_self_cond = True
+
+    # Model prediction: predict ε (with optional self-conditioning)
+    eps_pred = model(x_t, t, mask=mask, x0_self_cond=x0_self_cond)
 
     # MASKED LOSS CALCULATION: MSE(ε_pred, ε)
     if mask is not None:
@@ -212,6 +233,7 @@ def train_step(
         "eps_loss": eps_loss.item(),
         "bond_loss": bond_loss.item() if isinstance(bond_loss, torch.Tensor) else bond_loss,
         "t_mean": t.float().mean().item(),
+        "self_cond": float(used_self_cond),
     }
 
 
