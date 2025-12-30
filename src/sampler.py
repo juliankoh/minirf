@@ -38,6 +38,7 @@ class DiffusionSampler:
         verbose: bool = True,
         device: torch.device | None = None,
         mask: torch.Tensor | None = None,
+        add_noise: bool = True,
     ) -> torch.Tensor:
         """Generate samples from pure noise.
 
@@ -47,6 +48,7 @@ class DiffusionSampler:
             device: Device to run on (defaults to model's device)
             mask: (B, L) boolean mask for valid positions (True=valid, False=padding)
                   If None, all positions are treated as valid.
+            add_noise: If False, use deterministic sampling (no stochastic noise).
 
         Returns:
             (B, L, 3) generated coordinates (scaled)
@@ -83,7 +85,7 @@ class DiffusionSampler:
             pred_eps = self.model(x_t, t, mask=mask)
 
             # 3. Take one step: x_t -> x_{t-1}
-            x_t = self.p_sample(x_t, pred_eps, t, step_index=i)
+            x_t = self.p_sample(x_t, pred_eps, t, step_index=i, add_noise=add_noise)
 
             # 4. Keep padding frozen at zero (prevents pad drift)
             x_t = x_t * mask_3d
@@ -97,6 +99,7 @@ class DiffusionSampler:
         start_t: int,
         verbose: bool = True,
         mask: torch.Tensor | None = None,
+        add_noise: bool = True,
     ) -> torch.Tensor:
         """Generate samples starting from a given noisy state.
 
@@ -109,6 +112,8 @@ class DiffusionSampler:
             verbose: Show progress bar
             mask: (B, L) boolean mask for valid positions (True=valid, False=padding)
                   If None, all positions are treated as valid.
+            add_noise: If False, use deterministic sampling (no stochastic noise).
+                       Useful for reproducible reconstruction evaluation.
 
         Returns:
             (B, L, 3) generated coordinates (scaled)
@@ -138,7 +143,7 @@ class DiffusionSampler:
             pred_eps = self.model(x_t, t, mask=mask)
 
             # Take one step: x_t -> x_{t-1}
-            x_t = self.p_sample(x_t, pred_eps, t, step_index=i)
+            x_t = self.p_sample(x_t, pred_eps, t, step_index=i, add_noise=add_noise)
 
             # Keep padding frozen at zero (prevents pad drift)
             x_t = x_t * mask_3d
@@ -151,6 +156,7 @@ class DiffusionSampler:
         pred_eps: torch.Tensor,
         t: torch.Tensor,
         step_index: int,
+        add_noise: bool = True,
     ) -> torch.Tensor:
         """Calculate x_{t-1} given x_t and predicted ε.
 
@@ -168,6 +174,8 @@ class DiffusionSampler:
             pred_eps: Model's prediction of the noise ε
             t: Current timestep indices
             step_index: Integer step (for checking if t=0)
+            add_noise: If False, use deterministic sampling (no stochastic noise).
+                       Useful for reproducible reconstruction evaluation.
 
         Returns:
             x_{t-1}: Sample at previous timestep
@@ -193,8 +201,8 @@ class DiffusionSampler:
             x_t - beta_t / sqrt_one_minus_alpha_bar_t * pred_eps
         )
 
-        # Add noise (except at final step t=0)
-        if step_index > 0:
+        # Add noise (except at final step t=0, or if deterministic mode)
+        if step_index > 0 and add_noise:
             # Correct posterior variance: β̃_t = β_t * (1 - α̅_{t-1}) / (1 - α̅_t)
             beta_tilde = beta_t * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)
             sigma_t = torch.sqrt(beta_tilde)

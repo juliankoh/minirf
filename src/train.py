@@ -120,8 +120,10 @@ def train_step(
     x0: torch.Tensor,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    scale_factor: float = 10.0,
+    bond_loss_weight: float = 0.1,
 ) -> dict:
-    """Single training step with ε-prediction.
+    """Single training step with ε-prediction and auxiliary bond-length loss.
 
     Args:
         model: The diffusion transformer (predicts ε)
@@ -129,6 +131,8 @@ def train_step(
         x0: (B, L, 3) clean coordinates (scaled, canonically oriented)
         optimizer: Optimizer
         device: Device to run on (cuda/mps/cpu)
+        scale_factor: Coordinate scaling factor (for bond length target)
+        bond_loss_weight: Weight for auxiliary bond-length loss (λ)
 
     Returns:
         Dictionary with loss and metrics
@@ -163,9 +167,36 @@ def train_step(
         # Expand mask for coordinates: (B, L) -> (B, L, 3)
         mask_3d = mask.unsqueeze(-1).expand_as(eps_pred)
         # Only compute error on real atoms
-        loss = F.mse_loss(eps_pred[mask_3d], noise[mask_3d])
+        eps_loss = F.mse_loss(eps_pred[mask_3d], noise[mask_3d])
     else:
-        loss = F.mse_loss(eps_pred, noise)
+        eps_loss = F.mse_loss(eps_pred, noise)
+
+    # AUXILIARY BOND-LENGTH LOSS
+    # Compute implied x0 from the predicted noise
+    sqrt_ab = schedule.sqrt_alpha_bars[t].view(B, 1, 1)
+    sqrt_omb = schedule.sqrt_one_minus_alpha_bars[t].view(B, 1, 1)
+    x0_pred = (x_t - sqrt_omb * eps_pred) / sqrt_ab
+
+    # Compute bond vectors and lengths
+    bond_vecs = x0_pred[:, 1:] - x0_pred[:, :-1]  # (B, L-1, 3)
+    bond_lens = torch.linalg.norm(bond_vecs, dim=-1)  # (B, L-1)
+
+    # Target CA-CA distance is 3.8 Å, scaled
+    target = 3.8 / scale_factor
+
+    # Compute bond loss with masking
+    if mask is not None:
+        # Valid bonds are where both atoms are real
+        valid_bonds = mask[:, 1:] & mask[:, :-1]  # (B, L-1)
+        if valid_bonds.any():
+            bond_loss = ((bond_lens[valid_bonds] - target) ** 2).mean()
+        else:
+            bond_loss = torch.tensor(0.0, device=device)
+    else:
+        bond_loss = ((bond_lens - target) ** 2).mean()
+
+    # Combined loss
+    loss = eps_loss + bond_loss_weight * bond_loss
 
     # Backprop
     optimizer.zero_grad()
@@ -178,6 +209,8 @@ def train_step(
 
     return {
         "loss": loss.item(),
+        "eps_loss": eps_loss.item(),
+        "bond_loss": bond_loss.item() if isinstance(bond_loss, torch.Tensor) else bond_loss,
         "t_mean": t.float().mean().item(),
     }
 
@@ -418,6 +451,12 @@ def main():
         "--num_heads", type=int, default=4, help="Number of attention heads"
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--bond_loss_weight",
+        type=float,
+        default=0.1,
+        help="Weight for auxiliary bond-length loss (λ)",
+    )
     parser.add_argument("--log_every", type=int, default=100, help="Log every N steps")
     parser.add_argument(
         "--eval_every", type=int, default=10000, help="Evaluate every N steps"
@@ -492,6 +531,27 @@ def main():
     print("=" * 60)
     print("Diffusion Transformer Training")
     print("=" * 60)
+
+    # Print all hyperparameters
+    print("\nHyperparameters:")
+    print(f"  steps:            {args.steps}")
+    print(f"  batch_size:       {args.batch_size}")
+    print(f"  lr:               {args.lr}")
+    print(f"  max_len:          {args.max_len}")
+    print(f"  d_model:          {args.d_model}")
+    print(f"  num_layers:       {args.num_layers}")
+    print(f"  num_heads:        {args.num_heads}")
+    print(f"  num_chains:       {args.num_chains}")
+    print(f"  seed:             {args.seed}")
+    print(f"  bond_loss_weight: {args.bond_loss_weight}")
+    print(f"  log_every:        {args.log_every}")
+    print(f"  eval_every:       {args.eval_every}")
+    print(f"  sample_every:     {args.sample_every}")
+    print(f"  save_every:       {args.save_every}")
+    print(f"  overfit:          {args.overfit}")
+    print(f"  scale_factor:     {scale_factor}")
+    print(f"  diffusion_T:      1000")
+    print(f"  device:           {device}")
 
     if args.overfit:
         print("\nMode: Single-chain overfitting (sanity check)")
@@ -642,7 +702,10 @@ def main():
         else:
             batch_data = train_dataset.sample_batch(args.batch_size, rng)
 
-        result = train_step(model, schedule, batch_data, optimizer, device=device)
+        result = train_step(
+            model, schedule, batch_data, optimizer, device=device,
+            scale_factor=scale_factor, bond_loss_weight=args.bond_loss_weight
+        )
         losses.append(result["loss"])
         scheduler.step()
 
@@ -702,7 +765,8 @@ def main():
 
             x_t, _ = schedule.q_sample(recon_target, t_tensor, noise=noise)
 
-            recon = sampler.sample_from(x_t, start_t=t_start, mask=recon_mask, verbose=False)
+            # Deterministic sampling (add_noise=False) for reproducible evaluation
+            recon = sampler.sample_from(x_t, start_t=t_start, mask=recon_mask, verbose=False, add_noise=False)
 
             recon_np = recon.squeeze(0).detach().cpu().numpy() * scale_factor
             true_np  = recon_target.squeeze(0).detach().cpu().numpy() * scale_factor
