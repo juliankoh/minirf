@@ -44,7 +44,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from .data_cath import filter_chains, get_one_chain, load_chain_segments_by_ids, load_splits
+from .data_cath import filter_chains, get_one_chain, load_chain_segments_by_ids, load_chain_windows_by_ids, load_splits
 from .diffusion import DiffusionSchedule
 from .eval import Evaluator, print_eval_report
 from .geom import align_to_principal_axes, ca_bond_lengths, center, rmsd
@@ -507,6 +507,17 @@ def main():
         default=5000,
         help="Save checkpoint every N steps (0 to disable periodic saves)",
     )
+    parser.add_argument(
+        "--use_sliding_windows",
+        action="store_true",
+        help="Use sliding windows to extract crops from long chains (recovers more data)",
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=64,
+        help="Stride for sliding windows (default 64 = 50%% overlap with max_len=128)",
+    )
     args = parser.parse_args()
 
     # Create timestamped run directory
@@ -576,6 +587,8 @@ def main():
     print(f"  eval_every:       {args.eval_every}")
     print(f"  sample_every:     {args.sample_every}")
     print(f"  save_every:       {args.save_every}")
+    print(f"  sliding_windows:  {args.use_sliding_windows}")
+    print(f"  stride:           {args.stride}")
     print(f"  overfit:          {args.overfit}")
     print(f"  scale_factor:     {scale_factor}")
     print(f"  diffusion_T:      1000")
@@ -617,35 +630,61 @@ def main():
             f"Split sizes: train={len(splits['train'])}, val={len(splits['validation'])}, test={len(splits['test'])}"
         )
 
-        # Load train segments (extract contiguous resolved regions)
-        print(f"Loading train segments (len 40-{args.max_len})...")
-        train_chains = load_chain_segments_by_ids(
-            data_path,
-            chain_ids=splits["train"],
-            min_len=40,
-            max_len=args.max_len,
-            keep_longest_only=True,  # One segment per chain (Policy A)
-            limit=args.num_chains if args.num_chains else None,
-            verbose=True,
-        )
+        # Load training data
+        if args.use_sliding_windows:
+            # Sliding windows: extract overlapping crops from long chains
+            print(f"Loading train windows (window={args.max_len}, stride={args.stride})...")
+            train_chains = load_chain_windows_by_ids(
+                data_path,
+                chain_ids=splits["train"],
+                window_size=args.max_len,
+                stride=args.stride,
+                min_len=40,
+                keep_longest_only=True,  # One segment per chain (maintains split integrity)
+                limit=args.num_chains if args.num_chains else None,
+                verbose=True,
+            )
 
-        # Load val segments
-        print(f"Loading validation segments (len 40-{args.max_len})...")
-        val_chains = load_chain_segments_by_ids(
-            data_path,
-            chain_ids=splits["validation"],
-            min_len=40,
-            max_len=args.max_len,
-            keep_longest_only=True,
-            verbose=True,
-        )
+            print(f"Loading validation windows (window={args.max_len}, stride={args.stride})...")
+            val_chains = load_chain_windows_by_ids(
+                data_path,
+                chain_ids=splits["validation"],
+                window_size=args.max_len,
+                stride=args.stride,
+                min_len=40,
+                keep_longest_only=True,
+                verbose=True,
+            )
+        else:
+            # Original behavior: complete domains only (reject chains > max_len)
+            print(f"Loading train segments (len 40-{args.max_len})...")
+            train_chains = load_chain_segments_by_ids(
+                data_path,
+                chain_ids=splits["train"],
+                min_len=40,
+                max_len=args.max_len,
+                keep_longest_only=True,  # One segment per chain (Policy A)
+                limit=args.num_chains if args.num_chains else None,
+                verbose=True,
+            )
 
-        # Shuffle train segments (for training randomness)
+            print(f"Loading validation segments (len 40-{args.max_len})...")
+            val_chains = load_chain_segments_by_ids(
+                data_path,
+                chain_ids=splits["validation"],
+                min_len=40,
+                max_len=args.max_len,
+                keep_longest_only=True,
+                verbose=True,
+            )
+
+        # Shuffle train data (for training randomness)
         rng.shuffle(train_chains)
 
-        print(f"After segment extraction:")
-        print(f"  Train: {len(train_chains)} segments")
-        print(f"  Val:   {len(val_chains)} segments")
+        data_type = "windows" if args.use_sliding_windows else "segments"
+        print(f"After extraction:")
+        print(f"  Train: {len(train_chains)} {data_type}")
+        print(f"  Val:   {len(val_chains)} {data_type}")
 
         train_dataset = ProteinDataset(
             train_chains, max_len=args.max_len, scale_factor=scale_factor

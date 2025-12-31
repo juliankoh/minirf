@@ -110,6 +110,81 @@ def find_contiguous_segments(mask: np.ndarray) -> list[tuple[int, int]]:
     return segments
 
 
+def extract_sliding_windows(
+    segment: dict,
+    window_size: int = 128,
+    stride: int = 64,
+    min_len: int = 40,
+) -> list[dict]:
+    """Extract overlapping windows from a segment.
+
+    For segments <= window_size, returns the segment as a single window.
+    For longer segments, extracts overlapping windows with the given stride,
+    plus a final window aligned to the end to ensure full coverage.
+
+    Example: For a 256-residue segment with window_size=128, stride=64:
+        → [0:128], [64:192], [128:256] = 3 windows
+
+    Args:
+        segment: Dict with protein segment data
+        window_size: Size of each window
+        stride: Step between window starts
+        min_len: Minimum length for a valid window
+
+    Returns:
+        List of window sample dicts
+    """
+    L = len(segment["seq"])
+    parent_name = segment.get("parent_name", segment["name"])
+
+    # Short segment: return as-is (if meets min_len)
+    if L <= window_size:
+        if L >= min_len:
+            return [segment]
+        return []
+
+    windows = []
+    start = 0
+    window_idx = 0
+    last_end = 0
+
+    # Extract windows with stride
+    while start + window_size <= L:
+        end = start + window_size
+        window_sample = {
+            "name": f"{segment['name']}_win{window_idx}",
+            "parent_name": parent_name,
+            "seq": segment["seq"][start:end],
+            "window_start": start,
+            "window_end": end,
+            "coords": {},
+        }
+        for atom_name, coords in segment["coords"].items():
+            window_sample["coords"][atom_name] = coords[start:end]
+
+        windows.append(window_sample)
+        last_end = end
+        start += stride
+        window_idx += 1
+
+    # Add final window aligned to end if there's uncovered sequence
+    if last_end < L:
+        final_start = L - window_size
+        window_sample = {
+            "name": f"{segment['name']}_win{window_idx}",
+            "parent_name": parent_name,
+            "seq": segment["seq"][final_start:L],
+            "window_start": final_start,
+            "window_end": L,
+            "coords": {},
+        }
+        for atom_name, coords in segment["coords"].items():
+            window_sample["coords"][atom_name] = coords[final_start:L]
+        windows.append(window_sample)
+
+    return windows
+
+
 def extract_segments_from_chain(
     sample: dict,
     min_len: int = 40,
@@ -405,6 +480,95 @@ def load_chain_segments_by_ids(
         print(f"\nScanned: {total}, Chains with segments: {chains_with_segments}, Total segments: {len(segments)}")
 
     return segments
+
+
+def load_chain_windows_by_ids(
+    data_path: Path,
+    chain_ids: set[str],
+    window_size: int = 128,
+    stride: int = 64,
+    min_len: int = 40,
+    keep_longest_only: bool = True,
+    limit: int | None = None,
+    verbose: bool = False,
+) -> list[dict]:
+    """Load sliding windows from chains, recovering data from long chains.
+
+    This function:
+    1. Extracts contiguous resolved segments from each chain (handles NaN gaps)
+    2. For segments > window_size: extracts overlapping windows with stride
+    3. For segments <= window_size: keeps as single sample (if >= min_len)
+
+    This recovers training data from long chains that would otherwise be
+    rejected by max_len filtering.
+
+    Example: A 300-residue clean chain with window_size=128, stride=64:
+        → [0:128], [64:192], [128:256], [172:300] = 4 training samples
+
+    Args:
+        data_path: Path to chain_set.jsonl file
+        chain_ids: Set of chain IDs to load
+        window_size: Size of each window (should match model's max_len)
+        stride: Step between window starts (e.g., 64 = 50% overlap)
+        min_len: Minimum length for a valid window
+        keep_longest_only: If True, only process longest segment per chain
+                          (maintains split integrity). If False, process all
+                          segments (more data but potential split leakage).
+        limit: Maximum number of windows to return (None for all)
+        verbose: Print progress updates
+
+    Returns:
+        List of window sample dicts. Each has 'parent_name' for split tracking.
+    """
+    windows = []
+    total = 0
+    chains_processed = 0
+    chain_ids = set(chain_ids)
+
+    for sample in iter_chain_set_jsonl(data_path):
+        total += 1
+
+        if sample["name"] not in chain_ids:
+            continue
+
+        # Extract contiguous resolved segments (no max_len filter - we'll window them)
+        # Use a high max_len to accept long segments that we'll then window
+        chain_segments = extract_segments_from_chain(
+            sample,
+            min_len=min_len,
+            max_len=10000,  # Accept very long segments
+            keep_longest_only=keep_longest_only,
+        )
+
+        if not chain_segments:
+            continue
+
+        chains_processed += 1
+
+        # Apply sliding windows to each segment
+        for segment in chain_segments:
+            segment_windows = extract_sliding_windows(
+                segment,
+                window_size=window_size,
+                stride=stride,
+                min_len=min_len,
+            )
+            windows.extend(segment_windows)
+
+            if limit is not None and len(windows) >= limit:
+                windows = windows[:limit]
+                break
+
+        if limit is not None and len(windows) >= limit:
+            break
+
+        if verbose and total % 5000 == 0:
+            print(f"Scanned {total}... ({len(windows)} windows from {chains_processed} chains)")
+
+    if verbose:
+        print(f"\nScanned: {total}, Chains processed: {chains_processed}, Total windows: {len(windows)}")
+
+    return windows
 
 
 def main():
