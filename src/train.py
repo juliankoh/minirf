@@ -198,23 +198,25 @@ def train_step(
     sqrt_omb = schedule.sqrt_one_minus_alpha_bars[t].view(B, 1, 1)
     x0_pred = (x_t - sqrt_omb * eps_pred) / sqrt_ab
 
-    # Compute bond vectors and lengths
+    # --- bond loss (stable version, gated by timestep) ---
     bond_vecs = x0_pred[:, 1:] - x0_pred[:, :-1]  # (B, L-1, 3)
     bond_lens = torch.linalg.norm(bond_vecs, dim=-1)  # (B, L-1)
-
-    # Target CA-CA distance is 3.8 Å, scaled
     target = 3.8 / scale_factor
 
-    # Compute bond loss with masking
+    # Only apply bond loss for t < 200 (x0 predictions are garbage at high t)
+    bond_t_max = 200
+    t_gate = (t < bond_t_max).float().view(B, 1)  # (B, 1) broadcasts over (B, L-1)
+
+    bond_sq_err = (bond_lens - target) ** 2  # (B, L-1)
+
     if mask is not None:
-        # Valid bonds are where both atoms are real
         valid_bonds = mask[:, 1:] & mask[:, :-1]  # (B, L-1)
-        if valid_bonds.any():
-            bond_loss = ((bond_lens[valid_bonds] - target) ** 2).mean()
-        else:
-            bond_loss = torch.tensor(0.0, device=device)
+        bond_sq_err = bond_sq_err * valid_bonds.float()
+        denom = (valid_bonds.float() * t_gate).sum().clamp(min=1.0)
+        bond_loss = (bond_sq_err * t_gate).sum() / denom
     else:
-        bond_loss = ((bond_lens - target) ** 2).mean()
+        denom = t_gate.sum().clamp(min=1.0) * bond_lens.shape[1]
+        bond_loss = (bond_sq_err * t_gate).sum() / denom
 
     # Combined loss
     loss = eps_loss + bond_loss_weight * bond_loss
@@ -579,6 +581,13 @@ def main():
         print("\nMode: Single-chain overfitting (sanity check)")
         x0, name = load_single_chain(data_path, scale_factor)
         print(f"Chain: {name}, Length: {x0.shape[1]}")
+
+        # Print ground truth bond stats to verify dataset quality
+        true_np = x0.squeeze(0).cpu().numpy() * scale_factor
+        true_bonds = ca_bond_lengths(true_np)
+        print(f"Ground truth bonds: mean={true_bonds.mean():.2f} Å std={true_bonds.std():.2f} Å "
+              f"valid%={((true_bonds > 3.6) & (true_bonds < 4.0)).mean() * 100:.1f}%")
+
         train_dataset = None
         val_dataset = None
     else:
@@ -720,7 +729,8 @@ def main():
     for step in range(1, args.steps + 1):
         # Get batch
         if args.overfit:
-            batch_data = x0  # Tuple logic handles this being just tensor
+            # Repeat the same chain so each step trains on many timesteps/noise draws
+            batch_data = x0.repeat(args.batch_size, 1, 1)  # (B, L, 3)
         else:
             batch_data = train_dataset.sample_batch(args.batch_size, rng)
 
