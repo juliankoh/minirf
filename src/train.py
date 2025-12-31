@@ -518,6 +518,24 @@ def main():
         default=64,
         help="Stride for sliding windows (default 64 = 50%% overlap with max_len=128)",
     )
+    parser.add_argument(
+        "--min_len",
+        type=int,
+        default=40,
+        help="Minimum segment length to keep",
+    )
+    parser.add_argument(
+        "--keep_longest_only",
+        action="store_true",
+        default=True,
+        help="Keep only the longest valid segment per chain (default: True)",
+    )
+    parser.add_argument(
+        "--no_keep_longest_only",
+        action="store_false",
+        dest="keep_longest_only",
+        help="Keep all valid segments per chain (disables --keep_longest_only)",
+    )
     args = parser.parse_args()
 
     # Create timestamped run directory
@@ -589,6 +607,8 @@ def main():
     print(f"  save_every:       {args.save_every}")
     print(f"  sliding_windows:  {args.use_sliding_windows}")
     print(f"  stride:           {args.stride}")
+    print(f"  min_len:          {args.min_len}")
+    print(f"  keep_longest:     {args.keep_longest_only}")
     print(f"  overfit:          {args.overfit}")
     print(f"  scale_factor:     {scale_factor}")
     print(f"  diffusion_T:      1000")
@@ -639,8 +659,8 @@ def main():
                 chain_ids=splits["train"],
                 window_size=args.max_len,
                 stride=args.stride,
-                min_len=40,
-                keep_longest_only=True,  # One segment per chain (maintains split integrity)
+                min_len=args.min_len,
+                keep_longest_only=args.keep_longest_only,
                 limit=args.num_chains if args.num_chains else None,
                 verbose=True,
             )
@@ -651,30 +671,30 @@ def main():
                 chain_ids=splits["validation"],
                 window_size=args.max_len,
                 stride=args.stride,
-                min_len=40,
-                keep_longest_only=True,
+                min_len=args.min_len,
+                keep_longest_only=args.keep_longest_only,
                 verbose=True,
             )
         else:
             # Original behavior: complete domains only (reject chains > max_len)
-            print(f"Loading train segments (len 40-{args.max_len})...")
+            print(f"Loading train segments (len {args.min_len}-{args.max_len})...")
             train_chains = load_chain_segments_by_ids(
                 data_path,
                 chain_ids=splits["train"],
-                min_len=40,
+                min_len=args.min_len,
                 max_len=args.max_len,
-                keep_longest_only=True,  # One segment per chain (Policy A)
+                keep_longest_only=args.keep_longest_only,
                 limit=args.num_chains if args.num_chains else None,
                 verbose=True,
             )
 
-            print(f"Loading validation segments (len 40-{args.max_len})...")
+            print(f"Loading validation segments (len {args.min_len}-{args.max_len})...")
             val_chains = load_chain_segments_by_ids(
                 data_path,
                 chain_ids=splits["validation"],
-                min_len=40,
+                min_len=args.min_len,
                 max_len=args.max_len,
-                keep_longest_only=True,
+                keep_longest_only=args.keep_longest_only,
                 verbose=True,
             )
 
