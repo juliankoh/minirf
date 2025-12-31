@@ -44,7 +44,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from .data_cath import filter_chains, get_one_chain, load_chains_by_ids, load_splits
+from .data_cath import filter_chains, get_one_chain, load_chain_segments_by_ids, load_splits
 from .diffusion import DiffusionSchedule
 from .eval import Evaluator, print_eval_report
 from .geom import align_to_principal_axes, ca_bond_lengths, center, rmsd
@@ -401,12 +401,14 @@ def load_single_chain(
 ) -> tuple[torch.Tensor, str]:
     """Load and preprocess a single chain.
 
+    Applies same preprocessing as ProteinDataset: center, align, scale.
+
     Args:
         path: Path to chain_set.jsonl
         scale_factor: Coordinate scaling factor
 
     Returns:
-        x0: (1, L, 3) scaled, centered coordinates
+        x0: (1, L, 3) scaled, centered, aligned coordinates
         name: Chain name
     """
     result = get_one_chain(path)
@@ -414,8 +416,10 @@ def load_single_chain(
         raise ValueError("No chain found in dataset")
 
     name, seq, ca_coords = result
+    # Same preprocessing as ProteinDataset: center -> align -> scale
     ca_centered, _ = center(ca_coords)
-    x0 = torch.from_numpy(ca_centered).float().unsqueeze(0) / scale_factor
+    ca_aligned = align_to_principal_axes(ca_centered)
+    x0 = torch.from_numpy(ca_aligned).float().unsqueeze(0) / scale_factor
 
     return x0, name
 
@@ -579,14 +583,27 @@ def main():
 
     if args.overfit:
         print("\nMode: Single-chain overfitting (sanity check)")
-        x0, name = load_single_chain(data_path, scale_factor)
-        print(f"Chain: {name}, Length: {x0.shape[1]}")
+        x0_raw, name = load_single_chain(data_path, scale_factor)
+        L = x0_raw.shape[1]
+        print(f"Chain: {name}, Length: {L}")
 
         # Print ground truth bond stats to verify dataset quality
-        true_np = x0.squeeze(0).cpu().numpy() * scale_factor
+        true_np = x0_raw.squeeze(0).cpu().numpy() * scale_factor
         true_bonds = ca_bond_lengths(true_np)
         print(f"Ground truth bonds: mean={true_bonds.mean():.2f} Å std={true_bonds.std():.2f} Å "
               f"valid%={((true_bonds > 3.6) & (true_bonds < 4.0)).mean() * 100:.1f}%")
+
+        # Pad to max_len and create mask (tests same code path as dataset training)
+        if L > args.max_len:
+            print(f"Warning: chain length {L} > max_len {args.max_len}, truncating")
+            x0_raw = x0_raw[:, :args.max_len]
+            L = args.max_len
+
+        x0 = torch.zeros(1, args.max_len, 3)
+        x0[:, :L] = x0_raw[:, :L]
+        overfit_mask = torch.zeros(1, args.max_len, dtype=torch.bool)
+        overfit_mask[:, :L] = True
+        print(f"Padded to max_len={args.max_len}, mask covers {L} real atoms")
 
         train_dataset = None
         val_dataset = None
@@ -600,33 +617,35 @@ def main():
             f"Split sizes: train={len(splits['train'])}, val={len(splits['validation'])}, test={len(splits['test'])}"
         )
 
-        # Load train chains (filtered by length)
-        print(f"Loading train chains (len 40-{args.max_len})...")
-        train_chains = load_chains_by_ids(
+        # Load train segments (extract contiguous resolved regions)
+        print(f"Loading train segments (len 40-{args.max_len})...")
+        train_chains = load_chain_segments_by_ids(
             data_path,
             chain_ids=splits["train"],
             min_len=40,
             max_len=args.max_len,
+            keep_longest_only=True,  # One segment per chain (Policy A)
             limit=args.num_chains if args.num_chains else None,
             verbose=True,
         )
 
-        # Load val chains (filtered by length)
-        print(f"Loading validation chains (len 40-{args.max_len})...")
-        val_chains = load_chains_by_ids(
+        # Load val segments
+        print(f"Loading validation segments (len 40-{args.max_len})...")
+        val_chains = load_chain_segments_by_ids(
             data_path,
             chain_ids=splits["validation"],
             min_len=40,
             max_len=args.max_len,
+            keep_longest_only=True,
             verbose=True,
         )
 
-        # Shuffle train chains (for training randomness)
+        # Shuffle train segments (for training randomness)
         rng.shuffle(train_chains)
 
-        print(f"After length filtering:")
-        print(f"  Train: {len(train_chains)} chains")
-        print(f"  Val:   {len(val_chains)} chains")
+        print(f"After segment extraction:")
+        print(f"  Train: {len(train_chains)} segments")
+        print(f"  Val:   {len(val_chains)} segments")
 
         train_dataset = ProteinDataset(
             train_chains, max_len=args.max_len, scale_factor=scale_factor
@@ -730,7 +749,11 @@ def main():
         # Get batch
         if args.overfit:
             # Repeat the same chain so each step trains on many timesteps/noise draws
-            batch_data = x0.repeat(args.batch_size, 1, 1)  # (B, L, 3)
+            # Include mask to test same code path as dataset training
+            batch_data = (
+                x0.repeat(args.batch_size, 1, 1),  # (B, L, 3)
+                overfit_mask.repeat(args.batch_size, 1),  # (B, L)
+            )
         else:
             batch_data = train_dataset.sample_batch(args.batch_size, rng)
 
@@ -782,8 +805,10 @@ def main():
             recon_target = x0 if args.overfit else val_x0_for_recon
             recon_target = recon_target.to(device)
 
-            recon_mask = None
-            if not args.overfit:
+            # Use mask in overfit mode too (tests same code path as dataset training)
+            if args.overfit:
+                recon_mask = overfit_mask.to(device)  # (1, L)
+            else:
                 recon_mask = val_recon_mask.unsqueeze(0).to(device)  # (1, L)
 
             sampler = DiffusionSampler(model, schedule)
