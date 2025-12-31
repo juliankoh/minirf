@@ -162,9 +162,13 @@ class Evaluator:
         self,
         x0: torch.Tensor,
         mask: torch.Tensor,
-        start_timesteps: list[int] = [500, 900],
+        start_timesteps: list[int] = [300, 500, 900],
     ) -> dict[str, float]:
-        """Noise real data and try to rebuild it. Tests sampler mechanics."""
+        """Noise real data and try to rebuild it. Tests sampler mechanics.
+
+        Uses deterministic sampling (add_noise=False) for stable, low-variance
+        metrics that correlate with denoiser quality.
+        """
         stats = {}
 
         for t_start in start_timesteps:
@@ -174,8 +178,10 @@ class Evaluator:
             )
             x_t, _ = self.schedule.q_sample(x0, t_tensor)
 
-            # 2. Denoise back to 0 (pass mask so model knows which positions are real)
-            x_recon = self.sampler.sample_from(x_t, start_t=t_start, verbose=False, mask=mask)
+            # 2. Denoise back to 0 (deterministic for stable metrics)
+            x_recon = self.sampler.sample_from(
+                x_t, start_t=t_start, verbose=False, mask=mask, add_noise=False
+            )
 
             # 3. Measure RMSD to ground truth
             rmsds = []
@@ -282,8 +288,8 @@ def print_eval_report(metrics: dict[str, float], step: int) -> None:
     print(f"  MSE t=100: {metrics.get('denoise/mse_t100', 0):.4f}  |  t=500: {metrics.get('denoise/mse_t500', 0):.4f}  |  t=900: {metrics.get('denoise/mse_t900', 0):.4f}")
     print(f"  x0 RMSD t=100: {metrics.get('denoise/x0_rmsd_t100', 0):.2f} A  |  t=500: {metrics.get('denoise/x0_rmsd_t500', 0):.2f} A")
 
-    print("Reconstruction:")
-    print(f"  RMSD from t=500: {metrics.get('recon/rmsd_t500', 0):.2f} A  |  t=900: {metrics.get('recon/rmsd_t900', 0):.2f} A")
+    print("Reconstruction (deterministic):")
+    print(f"  RMSD from t=300: {metrics.get('recon/rmsd_t300', 0):.2f} A  |  t=500: {metrics.get('recon/rmsd_t500', 0):.2f} A  |  t=900: {metrics.get('recon/rmsd_t900', 0):.2f} A")
 
     print("Generation:")
     print(f"  Bond: {metrics.get('gen/bond_len_mean', 0):.2f} A (valid: {metrics.get('gen/valid_bond_pct', 0):.0%})  |  Clashes: {metrics.get('gen/clashes_mean', 0):.1f}  |  Rg: {metrics.get('gen/rg_mean', 0):.1f} A")
@@ -422,7 +428,8 @@ def main():
     print(f"   x0 RMSD (t=100):      {metrics.get('denoise/x0_rmsd_t100', 0):.2f} A")
     print(f"   x0 RMSD (t=500):      {metrics.get('denoise/x0_rmsd_t500', 0):.2f} A")
 
-    print("\n2. Reconstruction (Sampler Sanity)")
+    print("\n2. Reconstruction (Deterministic Sampling)")
+    print(f"   RMSD from t=300:      {metrics.get('recon/rmsd_t300', 0):.2f} A")
     print(f"   RMSD from t=500:      {metrics.get('recon/rmsd_t500', 0):.2f} A")
     print(f"   RMSD from t=900:      {metrics.get('recon/rmsd_t900', 0):.2f} A")
 

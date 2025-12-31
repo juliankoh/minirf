@@ -69,7 +69,7 @@ class DiffusionSchedule:
         T: int = 1000,
         beta_start: float = 1e-4,
         beta_end: float = 0.02,
-        kind: str = "linear",
+        kind: str = "cosine",
     ):
         self.T = T
 
@@ -166,7 +166,7 @@ def main():
     x0 = torch.from_numpy(ca_centered).float() / scale_factor
 
     # Create schedule
-    schedule = DiffusionSchedule(T=1000, kind="linear")
+    schedule = DiffusionSchedule(T=1000, kind="cosine")
 
     print(f"\nDiffusion Schedule (T={schedule.T}):")
     print(f"  beta range: [{schedule.betas[0]:.6f}, {schedule.betas[-1]:.6f}]")

@@ -152,17 +152,18 @@ Consider coordinate scaling for stability:
 **Goal:** Model that takes `(x_t, t, mask)` and predicts `eps_hat` with shape `(L,3)`.
 
 ### Checklist
-- [ ] Implement `src/model.py` with `EpsTransformer`:
-  - [ ] Input projection: `Linear(3 -> d_model)`
-  - [ ] **Residue positional encoding** (sinusoidal or learned) - CRITICAL!
-  - [ ] Timestep embedding (sinusoidal MLP → `d_model`)
-  - [ ] `TransformerEncoder` 3-4 layers
-  - [ ] Output projection: `Linear(d_model -> 3)`
-- [ ] Use `src_key_padding_mask` (PyTorch: `True` means "ignore")
+- [x] Implement `src/model.py` with `DiffusionTransformer`:
+  - [x] Input projection: `Linear(3 -> d_model)`
+  - [x] **Residue positional encoding** (sinusoidal) - CRITICAL!
+  - [x] Timestep embedding (sinusoidal MLP → `d_model`)
+  - [x] Transformer blocks with geometric attention (pairwise distance bias)
+  - [x] Output projection: `Linear(d_model -> 3)`
+- [x] Use mask for padding positions
+- [x] Self-conditioning support (feed previous x0 estimate)
 
 ### Acceptance Criteria
-- [ ] One forward pass works: input `(B,L,3)` → output `(B,L,3)`
-- [ ] Loss computation runs without shape errors
+- [x] One forward pass works: input `(B,L,3)` → output `(B,L,3)`
+- [x] Loss computation runs without shape errors
 
 ### Why Positional Encoding Matters
 Without it, Transformer is permutation-invariant over residues → weird "unordered point cloud" behavior even if loss decreases.
@@ -174,17 +175,17 @@ Without it, Transformer is permutation-invariant over residues → weird "unorde
 **Goal:** Make the model memorize one protein fast. If this fails, don't scale up.
 
 ### Checklist
-- [ ] Create `notebooks/02_overfit_single_chain.ipynb`:
-  - [ ] Load one chain `x0`
-  - [ ] Training loop:
-    1. [ ] Sample `t ~ Uniform(1..T)`
-    2. [ ] Sample `eps ~ N(0, I)`
-    3. [ ] Build `x_t = q_sample(x0, t, eps)`
-    4. [ ] `eps_hat = model(x_t, t)`
-    5. [ ] Loss = `MSE(eps_hat, eps)`
-- [ ] Add TensorBoard logging:
-  - [ ] Train loss
-  - [ ] `x0_recon_rmsd` diagnostic
+- [x] Implement in `src/train.py` with `--overfit` flag:
+  - [x] Load one chain `x0`
+  - [x] Training loop:
+    1. [x] Sample `t ~ Uniform(0..T)`
+    2. [x] Sample `eps ~ N(0, I)`
+    3. [x] Build `x_t = q_sample(x0, t, eps)`
+    4. [x] `eps_pred = model(x_t, t, mask, x0_self_cond)`
+    5. [x] Loss = `MSE(eps_pred, eps) + lambda * bond_loss`
+- [x] Add logging:
+  - [x] Train loss, eps loss, bond loss
+  - [x] Reconstruction RMSD every N steps
 
 ### Critical Diagnostic
 Compute implied `x0_hat`:
@@ -194,9 +195,9 @@ x0_hat = (x_t - sqrt(1-alpha_bar_t)*eps_hat) / sqrt(alpha_bar_t)
 Then compute Kabsch RMSD(`x0_hat`, `x0`) occasionally.
 
 ### Acceptance Criteria
-- [ ] Training loss drops sharply
-- [ ] `x0_hat` RMSD trends downward
-- [ ] `ca_bond_lengths(x0_hat)` becomes reasonable (not perfect, but not insane)
+- [x] Training loss drops sharply
+- [x] `x0_hat` RMSD trends downward
+- [x] `ca_bond_lengths(x0_hat)` becomes reasonable (not perfect, but not insane)
 
 ---
 
@@ -205,18 +206,22 @@ Then compute Kabsch RMSD(`x0_hat`, `x0`) occasionally.
 **Goal:** Start from noise and denoise to a full CA chain.
 
 ### Checklist
-- [ ] Add to `src/diffusion.py`:
-  - [ ] `p_sample(x_t, t, eps_hat)` (DDPM update)
-  - [ ] `sample(model, shape=(L,3), T=..., ...)` full loop
-- [ ] Create `notebooks/03_sampling_eval.ipynb`:
-  - [ ] Sample 5-20 structures
-  - [ ] Align to `x0` and compute RMSD distribution
-  - [ ] Visualize best / median sample
+- [x] Implement `src/sampler.py`:
+  - [x] `DiffusionSampler` class with DDPM posterior sampling
+  - [x] `p_sample(x_t, eps_pred, t)` computes x_{t-1}
+  - [x] `sample(shape)` - full generation from noise
+  - [x] `sample_from(x_t, start_t)` - reconstruction from noised data
+  - [x] Self-conditioning during sampling
+  - [x] Deterministic mode (add_noise=False) for reproducible evaluation
+- [x] Implement `src/eval.py`:
+  - [x] Denoiser metrics (MSE, x0-prediction RMSD)
+  - [x] Reconstruction metrics (noise -> denoise -> compare)
+  - [x] Generation metrics (bonds, clashes, Rg, diversity, memorization)
 
 ### Acceptance Criteria
-- [ ] Samples are not exploding (NaNs) and not collapsing to a point
-- [ ] At least some samples have visibly protein-like continuity
-- [ ] Overfit case: at least one sample close to native after alignment
+- [x] Samples are not exploding (NaNs) and not collapsing to a point
+- [x] At least some samples have visibly protein-like continuity
+- [x] Overfit case: at least one sample close to native after alignment
 
 ---
 
@@ -229,9 +234,9 @@ Then compute Kabsch RMSD(`x0_hat`, `x0`) occasionally.
 | TICKET-003 | Implement `geom.py` (center, Kabsch, RMSD, CA-CA distances) + unit tests | [x] done |
 | TICKET-004 | Implement `pdb_io.py` + `viz.py` + Notebook 00 that renders one chain | [x] done |
 | TICKET-005 | Implement `diffusion.py` schedule + `q_sample` + Notebook 01 visualizing noising | [x] done |
-| TICKET-006 | Implement `EpsTransformer` (with residue + time embeddings) + smoke test | [ ] |
-| TICKET-007 | Notebook 02: overfit single chain + TensorBoard + `x0_hat` RMSD diagnostic | [ ] |
-| TICKET-008 | Implement reverse sampling + Notebook 03 eval: RMSD + geometry checks + viz | [ ] |
+| TICKET-006 | Implement `DiffusionTransformer` (geometric attention + self-conditioning) | [x] done |
+| TICKET-007 | Training loop with overfit mode, bond loss, reconstruction tests | [x] done |
+| TICKET-008 | Implement reverse sampling (`sampler.py`) + eval suite (`eval.py`) | [x] done |
 
 ---
 
@@ -246,12 +251,13 @@ This tight loop prevents 90% of diffusion-project dead ends.
 ## After Overfit Works: Next Minimal Expansion
 
 Once single-chain overfit works:
-- [ ] Train on small subset (e.g., 1k short chains, length 80-120)
-- [ ] Add padding + mask properly
-- [ ] Evaluate unconditional samples with:
-  - [ ] CA-CA bond length stats
-  - [ ] Radius of gyration distribution
-  - [ ] Nearest-neighbor distance distribution
-  - [ ] Visual inspection
+- [x] Train on small subset (configurable via `--num_chains`)
+- [x] Add padding + mask properly (complete domains 40-128 residues)
+- [x] Evaluate unconditional samples with:
+  - [x] CA-CA bond length stats (mean, std, valid%)
+  - [x] Radius of gyration distribution
+  - [x] Steric clash detection
+  - [x] Diversity (pairwise RMSD)
+  - [x] Memorization check (nearest-neighbor to training)
 
 **No SE(3), no sidechains yet.**
