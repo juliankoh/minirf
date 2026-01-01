@@ -256,11 +256,6 @@ def main():
     print(f"  Total runs analyzed: {len(all_runs)}")
     print(f"  Output saved to: {output_path}")
 
-    # Print summary
-    print("\nColumns in CSV:")
-    for key in sorted_keys:
-        print(f"  - {key}")
-
 
 if __name__ == '__main__':
     main()
