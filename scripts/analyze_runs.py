@@ -126,7 +126,8 @@ def parse_evals_from_log(log_path: Path) -> dict:
         evals['initial_rmsd'] = float(initial_match.group(3))
 
     # Extract total training steps completed
-    step_matches = re.findall(r'^\s*(\d+)\s+[\d\.]+\s+[\d\.]+', content, re.MULTILINE)
+    # Match 4+ columns to avoid collision with Final Evaluation table (which has 3 columns)
+    step_matches = re.findall(r'^\s*(\d+)\s+[\d\.]+\s+[\d\.]+\s+[\d\.]+', content, re.MULTILINE)
     if step_matches:
         evals['steps_completed'] = int(step_matches[-1])
 

@@ -33,6 +33,7 @@ Canonical Orientation:
 """
 
 import argparse
+import csv
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -456,6 +457,24 @@ def save_checkpoint(
     torch.save(checkpoint, path)
 
 
+def append_to_csv(path: Path, data: dict):
+    """Append a dictionary of metrics to a CSV file, creating headers if needed."""
+    file_exists = path.exists()
+
+    # Sort keys to ensure column order is deterministic
+    fieldnames = sorted(data.keys())
+    # Ensure 'step' is the first column if it exists
+    if 'step' in fieldnames:
+        fieldnames.remove('step')
+        fieldnames.insert(0, 'step')
+
+    with open(path, mode='a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(data)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train Diffusion Transformer")
     parser.add_argument("--steps", type=int, default=10000, help="Training steps")
@@ -828,6 +847,13 @@ def main():
             lr = scheduler.get_last_lr()[0]
             if args.overfit:
                 print(f"{step:>6} {avg_loss:>10.4f} {lr:>12.6f}")
+                # Write to train_history.csv
+                history_data = {
+                    "step": step,
+                    "loss_train_avg": avg_loss,
+                    "lr": lr,
+                }
+                append_to_csv(run_dir / "train_history.csv", history_data)
             else:
                 # Compute train loss on random batch, val loss on frozen anchor set
                 train_batch, train_mask = train_dataset.sample_batch(4, rng)
@@ -852,6 +878,16 @@ def main():
                         model, optimizer, scheduler, step, args, val_loss=val_eval
                     )
                     print(f"       New best val loss: {val_eval:.4f} (saved)")
+
+                # Write to train_history.csv
+                history_data = {
+                    "step": step,
+                    "loss_train_avg": avg_loss,
+                    "loss_train_eval": train_eval,
+                    "loss_val_eval": val_eval,
+                    "lr": lr,
+                }
+                append_to_csv(run_dir / "train_history.csv", history_data)
 
         # Periodic checkpoint saving
         if args.save_every > 0 and step % args.save_every == 0:
@@ -911,6 +947,10 @@ def main():
                 sample_batch_size=16,  # Small batch for speed during training
             )
             print_eval_report(metrics, step)
+
+            # Write to detailed_eval.csv
+            metrics["step"] = step
+            append_to_csv(run_dir / "detailed_eval.csv", metrics)
 
     # Final evaluation
     print(f"\n{'=' * 60}")
