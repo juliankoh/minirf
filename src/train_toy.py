@@ -264,7 +264,7 @@ def main():
     print(f"  Training batch: {x0.shape} (same chain repeated {args.batch_size}x)")
 
     # Hyperparameters
-    print(f"\nHyperparameters:")
+    print("\nHyperparameters:")
     print(f"  steps:            {args.steps}")
     print(f"  batch_size:       {args.batch_size}")
     print(f"  lr:               {args.lr}")
@@ -295,7 +295,7 @@ def main():
     scheduler = CosineAnnealingLR(optimizer, T_max=args.steps, eta_min=args.lr * 0.01)
 
     # Initial reconstruction test
-    print(f"\nInitial reconstruction (before training):")
+    print("\nInitial reconstruction (before training):")
     init_metrics = eval_reconstruction(
         model, schedule, x0_single, device, scale_factor, use_self_cond=args.self_cond
     )
@@ -348,7 +348,7 @@ def main():
         model, schedule, x0_single, device, scale_factor, use_self_cond=args.self_cond
     )
     print(f"Reconstruction RMSD: {final_metrics['rmsd']:.2f} Å")
-    print(f"Bond lengths:")
+    print("Bond lengths:")
     print(f"  Mean:    {final_metrics['bond_mean']:.2f} Å (target: 3.80 Å)")
     print(f"  Std:     {final_metrics['bond_std']:.2f} Å (target: ~0.00 Å)")
     print(f"  Valid%:  {final_metrics['bond_valid_pct']:.1f}% (3.6-4.0 Å range)")

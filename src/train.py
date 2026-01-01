@@ -44,7 +44,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from .data_cath import filter_chains, get_one_chain, load_chain_segments_by_ids, load_chain_windows_by_ids, load_splits
+from .data_cath import get_one_chain, load_chain_segments_by_ids, load_chain_windows_by_ids, load_splits
 from .diffusion import DiffusionSchedule
 from .eval import Evaluator, print_eval_report
 from .geom import align_to_principal_axes, ca_bond_lengths, center, rmsd
@@ -324,7 +324,7 @@ def plot_loss_curve(
             smoothed,
             color="blue",
             linewidth=2,
-            label=f"Train (smoothed)",
+            label="Train (smoothed)",
         )
 
     # Val loss if provided
@@ -611,7 +611,7 @@ def main():
     print(f"  keep_longest:     {args.keep_longest_only}")
     print(f"  overfit:          {args.overfit}")
     print(f"  scale_factor:     {scale_factor}")
-    print(f"  diffusion_T:      1000")
+    print("  diffusion_T:      1000")
     print(f"  device:           {device}")
 
     if args.overfit:
@@ -641,7 +641,7 @@ def main():
         train_dataset = None
         val_dataset = None
     else:
-        print(f"\nMode: Dataset training")
+        print("\nMode: Dataset training")
         print(f"Using pre-defined splits from {splits_path}")
 
         # Load pre-defined splits (CATH-stratified)
@@ -702,7 +702,7 @@ def main():
         rng.shuffle(train_chains)
 
         data_type = "windows" if args.use_sliding_windows else "segments"
-        print(f"After extraction:")
+        print("After extraction:")
         print(f"  Train: {len(train_chains)} {data_type}")
         print(f"  Val:   {len(val_chains)} {data_type}")
 
@@ -773,7 +773,7 @@ def main():
     scheduler = CosineAnnealingLR(optimizer, T_max=args.steps, eta_min=args.lr * 0.01)
 
     # Initial evaluation
-    print(f"\nInitial evaluation (t=100):")
+    print("\nInitial evaluation (t=100):")
     if args.overfit:
         x0_dev = x0.to(device)
         eval_result = eval_step(

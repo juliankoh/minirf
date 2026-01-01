@@ -3,7 +3,6 @@
 Analyze all training runs and extract hyperparameters + evaluation metrics to CSV.
 """
 
-import os
 import re
 import csv
 import torch
@@ -131,6 +130,22 @@ def parse_evals_from_log(log_path: Path) -> dict:
     if step_matches:
         evals['steps_completed'] = int(step_matches[-1])
 
+    # Extract dataset sizes (train/val)
+    # Matches patterns like "Train: 13805 segments" or "Train: 100 chains"
+    train_size_match = re.search(r'Train:\s*([\d,]+)\s+(?:segments|chains|windows)', content)
+    if train_size_match:
+        evals['train_size'] = int(train_size_match.group(1).replace(',', ''))
+
+    val_size_match = re.search(r'Val:\s*([\d,]+)\s+(?:segments|chains|windows)', content)
+    if val_size_match:
+        evals['val_size'] = int(val_size_match.group(1).replace(',', ''))
+
+    # Extract model parameters count
+    # Matches "Model parameters: 25,752,131"
+    params_match = re.search(r'Model parameters:\s*([\d,]+)', content)
+    if params_match:
+        evals['model_params'] = int(params_match.group(1).replace(',', ''))
+
     return evals
 
 
@@ -237,12 +252,12 @@ def main():
         for run in all_runs:
             writer.writerow(run)
 
-    print(f"\nAnalysis complete!")
+    print("\nAnalysis complete!")
     print(f"  Total runs analyzed: {len(all_runs)}")
     print(f"  Output saved to: {output_path}")
 
     # Print summary
-    print(f"\nColumns in CSV:")
+    print("\nColumns in CSV:")
     for key in sorted_keys:
         print(f"  - {key}")
 

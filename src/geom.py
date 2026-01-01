@@ -320,7 +320,7 @@ def main():
 
     # Test centering
     centered, centroid = center(ca_coords)
-    print(f"\nCentering:")
+    print("\nCentering:")
     print(
         f"  Original centroid: [{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}]"
     )
@@ -330,13 +330,13 @@ def main():
 
     # Test CA bond lengths
     bonds = ca_bond_lengths(ca_coords)
-    print(f"\nCA-CA bond lengths:")
+    print("\nCA-CA bond lengths:")
     print(f"  Mean: {bonds.mean():.2f} Å")
     print(f"  Std:  {bonds.std():.2f} Å")
     print(f"  Range: [{bonds.min():.2f}, {bonds.max():.2f}] Å")
 
     # Test Kabsch alignment (apply random rotation + translation, then recover)
-    print(f"\nKabsch alignment test:")
+    print("\nKabsch alignment test:")
     rng = np.random.default_rng(42)
 
     # Random rotation matrix (via QR decomposition)

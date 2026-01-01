@@ -475,7 +475,7 @@ def main():
     t = torch.tensor([500])
     x_t, eps = schedule.q_sample(x0, t)
 
-    print(f"\nForward pass:")
+    print("\nForward pass:")
     print(f"  Input x_t shape:  {x_t.shape}")
     print(f"  Timestep t:       {t.item()}")
 
@@ -487,7 +487,7 @@ def main():
     print(f"  Initial MSE loss: {loss.item():.4f}")
 
     # Verify gradients
-    print(f"\nGradient check:")
+    print("\nGradient check:")
     loss.backward()
     grad_norms = {}
     for pname, param in model.named_parameters():
@@ -498,14 +498,14 @@ def main():
     print(f"  Gradient norm range: [{min(grad_norms.values()):.6f}, {max(grad_norms.values()):.4f}]")
 
     # Test unbatched input
-    print(f"\nUnbatched input test:")
+    print("\nUnbatched input test:")
     x_t_unbatched = x_t.squeeze(0)
     eps_pred_unbatched = model(x_t_unbatched, 500)
     print(f"  Input:  {x_t_unbatched.shape}")
     print(f"  Output: {eps_pred_unbatched.shape}")
 
     # Test with mask
-    print(f"\nMask test:")
+    print("\nMask test:")
     mask = torch.ones(1, x_t.shape[1], dtype=torch.bool)
     mask[0, -10:] = False  # Mask last 10 positions
     eps_pred_masked = model(x_t, t, mask=mask)

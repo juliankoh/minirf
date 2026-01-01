@@ -25,7 +25,6 @@ At t=0: alpha_bar ≈ 1 (all signal, no noise)
 At t=T: alpha_bar ≈ 0 (no signal, all noise)
 """
 
-import numpy as np
 import torch
 
 

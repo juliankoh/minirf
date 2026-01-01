@@ -288,12 +288,10 @@ def main():
             num_heads=args.get("num_heads", 4),
         )
         model.load_state_dict(checkpoint["model_state_dict"])
-        trained = True
     else:
         print("\nNo trained model found. Using untrained model.")
         print("Train a model first: uv run python -m src.train --steps 5000")
         model = DiffusionTransformer(d_model=128, num_layers=4, num_heads=4)
-        trained = False
 
     sampler = DiffusionSampler(model, schedule)
 
@@ -350,7 +348,7 @@ def main():
     gen_rg = radius_of_gyration(gen_np)
     gen_bonds = ca_bond_lengths(gen_np)
 
-    print(f"\nGenerated structure:")
+    print("\nGenerated structure:")
     print(f"  RMSD to target: {gen_rmsd:.2f} Å (high is OK - different protein)")
     print(f"  Radius of gyration: {gen_rg:.2f} Å")
     print(f"  CA-CA bonds: mean={gen_bonds.mean():.2f} Å, std={gen_bonds.std():.2f} Å")
