@@ -48,7 +48,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from .data_cath import get_one_chain, load_chain_segments_by_ids, load_chain_windows_by_ids, load_splits
 from .diffusion import DiffusionSchedule
 from .eval import Evaluator, print_eval_report
-from .geom import align_to_principal_axes, ca_bond_lengths, center, rmsd
+from .geom import align_to_principal_axes, apply_random_rotation, ca_bond_lengths, center, rmsd
 from .model import DiffusionTransformer
 from .sampler import DiffusionSampler
 
@@ -65,6 +65,7 @@ class ProteinDataset:
         chains: list[dict],
         max_len: int = 128,
         scale_factor: float = 10.0,
+        augment_rotations: bool = False,
     ):
         """Initialize dataset.
 
@@ -72,10 +73,14 @@ class ProteinDataset:
             chains: List of chain dicts with 'coords' key containing CA coords
             max_len: Maximum length to pad sequences to
             scale_factor: Coordinate scaling factor
+            augment_rotations: If True, apply random SO(3) rotations during sampling.
+                              This forces the model to learn rotation-invariant features
+                              rather than memorizing absolute positions.
         """
         self.chains = chains
         self.max_len = max_len
         self.scale_factor = scale_factor
+        self.augment_rotations = augment_rotations
 
         # Preprocess all chains: center, align to principal axes, and scale
         self.coords_list = []
@@ -91,14 +96,23 @@ class ProteinDataset:
     def sample_batch(
         self, batch_size: int, rng: np.random.Generator
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sample a batch of complete domains, padded to max_len."""
+        """Sample a batch of complete domains, padded to max_len.
+
+        If augment_rotations is enabled, applies a random SO(3) rotation
+        to each sample. This prevents the model from memorizing absolute
+        positions and forces it to learn rotation-invariant features.
+        """
         batch_coords = []
         batch_mask = []
 
         for _ in range(batch_size):
             idx = rng.integers(0, len(self.coords_list))
-            coords = self.coords_list[idx]
+            coords = self.coords_list[idx].copy()  # Copy to avoid modifying cached data
             L = len(coords)
+
+            # Apply random SO(3) rotation if enabled
+            if self.augment_rotations:
+                coords, _ = apply_random_rotation(coords, rng)
 
             # Pad to max_len (no cropping - chains are pre-filtered to fit)
             padded = np.zeros((self.max_len, 3))
@@ -544,6 +558,11 @@ def main():
         help="Minimum segment length to keep",
     )
     parser.add_argument(
+        "--augment_rotations",
+        action="store_true",
+        help="Apply random SO(3) rotations during training (reduces overfitting)",
+    )
+    parser.add_argument(
         "--keep_longest_only",
         action="store_true",
         default=True,
@@ -628,6 +647,7 @@ def main():
     print(f"  stride:           {args.stride}")
     print(f"  min_len:          {args.min_len}")
     print(f"  keep_longest:     {args.keep_longest_only}")
+    print(f"  augment_rot:      {args.augment_rotations}")
     print(f"  overfit:          {args.overfit}")
     print(f"  scale_factor:     {scale_factor}")
     print("  diffusion_T:      1000")
@@ -726,10 +746,16 @@ def main():
         print(f"  Val:   {len(val_chains)} {data_type}")
 
         train_dataset = ProteinDataset(
-            train_chains, max_len=args.max_len, scale_factor=scale_factor
+            train_chains,
+            max_len=args.max_len,
+            scale_factor=scale_factor,
+            augment_rotations=args.augment_rotations,  # Only augment training data
         )
         val_dataset = ProteinDataset(
-            val_chains, max_len=args.max_len, scale_factor=scale_factor
+            val_chains,
+            max_len=args.max_len,
+            scale_factor=scale_factor,
+            augment_rotations=False,  # Keep validation deterministic
         )
 
         # Use first validation chain (padded) for reconstruction test
