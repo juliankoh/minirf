@@ -136,7 +136,7 @@ def train_step(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     scale_factor: float = 10.0,
-    bond_loss_weight: float = 0.1,
+    bond_loss_weight: float = 0.0,
     self_cond_prob: float = 0.5,
 ) -> dict:
     """Single training step with ε-prediction, bond loss, and self-conditioning.
@@ -515,7 +515,7 @@ def main():
     parser.add_argument(
         "--bond_loss_weight",
         type=float,
-        default=0.1,
+        default=0.0,
         help="Weight for auxiliary bond-length loss (λ)",
     )
     parser.add_argument("--log_every", type=int, default=100, help="Log every N steps")
